@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::fs;
 
-use pjsekai_scores::{Drawing, Lyric, Rebase, Score};
+use pjsekai_scores_rs::{Drawing, Lyric, Rebase, Score};
 
 #[derive(Parser, Debug)]
 #[command(name = "pjsekai-scores", about = "Project SEKAI score (.sus) to SVG converter")]

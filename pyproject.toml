@@ -10,4 +10,4 @@ requires-python = ">=3.9"
 
 [tool.maturin]
 features = ["python"]
-module-name = "pjsekai_scores"
+module-name = "pjsekai_scores_rs"

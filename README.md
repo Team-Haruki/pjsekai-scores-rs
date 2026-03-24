@@ -78,13 +78,13 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-pjsekai-scores = { path = "./pjsekai-scores-rs" }
+pjsekai-scores-rs = { path = "./pjsekai-scores-rs" }
 ```
 
 ### Basic example
 
 ```rust
-use pjsekai_scores::{Score, Drawing};
+use pjsekai_scores_rs::{Score, Drawing};
 
 fn main() {
     let mut score = Score::open("master.sus").expect("failed to open score");
@@ -107,7 +107,7 @@ fn main() {
 ### With rebase (custom BPM)
 
 ```rust
-use pjsekai_scores::{Score, Rebase, Drawing};
+use pjsekai_scores_rs::{Score, Rebase, Drawing};
 
 let mut score = Score::open("master.sus").unwrap();
 let rebase = Rebase::from_json(r#"{"musicId":1,"events":[{"bar":0,"bpm":160}]}"#).unwrap();
@@ -152,11 +152,11 @@ maturin develop --release
 ### Python API
 
 ```python
-import pjsekai_scores
+import pjsekai_scores_rs
 
 # ── Score ─────────────────────────────────────────────────────────────────────
-score = pjsekai_scores.Score.open("master.sus")          # load from file
-score = pjsekai_scores.Score.from_str(sus_text)          # load from string
+score = pjsekai_scores_rs.Score.open("master.sus")          # load from file
+score = pjsekai_scores_rs.Score.from_str(sus_text)          # load from string
 
 score.set_meta(
     title="Song Title",
@@ -176,16 +176,16 @@ score.event_count()  # -> int
 score.events()       # -> List[Event]  (each has .bar, .bpm, .speed, .text)
 
 # ── Rebase ────────────────────────────────────────────────────────────────────
-rebase = pjsekai_scores.Rebase.from_json('{"musicId":1,"events":[{"bar":0,"bpm":160}]}')
-rebase = pjsekai_scores.Rebase.from_dict({"musicId": 1, "events": [{"bar": 0, "bpm": 160}]})
+rebase = pjsekai_scores_rs.Rebase.from_json('{"musicId":1,"events":[{"bar":0,"bpm":160}]}')
+rebase = pjsekai_scores_rs.Rebase.from_dict({"musicId": 1, "events": [{"bar": 0, "bpm": 160}]})
 rebased_score = rebase.apply(score)
 
 # ── Lyric ─────────────────────────────────────────────────────────────────────
-lyric = pjsekai_scores.Lyric.load(lyric_text)   # load from string
+lyric = pjsekai_scores_rs.Lyric.load(lyric_text)   # load from string
 lyric.word_count()  # -> int
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
-drawing = pjsekai_scores.Drawing(
+drawing = pjsekai_scores_rs.Drawing(
     note_host="https://asset3.pjsekai.moe/live/note/custom01",
     style_sheet="",         # extra CSS appended after the built-in theme
     skill=False,            # render skill/fever overlays
@@ -212,7 +212,7 @@ with open("master.svg", "w") as f:
     f.write(svg_string)
 
 # ── Convenience function ──────────────────────────────────────────────────────
-svg = pjsekai_scores.sus_to_svg(
+svg = pjsekai_scores_rs.sus_to_svg(
     "master.sus",
     note_host="https://asset3.pjsekai.moe/live/note/custom01",
     style_sheet="",
@@ -261,7 +261,7 @@ PYO3_CROSS=1 PYO3_CROSS_PYTHON_VERSION=3.14 \
 ```
 pjsekai-scores-rs/
 ├── Cargo.toml          # Rust package manifest + PyO3 feature flag
-├── pyproject.toml      # maturin build config (module name: pjsekai_scores)
+├── pyproject.toml      # maturin build config (module name: pjsekai_scores_rs)
 ├── css/                # Built-in CSS themes (default, black, white, guess)
 └── src/
     ├── main.rs         # CLI entry point (clap)

@@ -245,14 +245,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "pjsekai-scores"
+name = "pjsekai-scores-rs"
 version = "0.1.0"
 dependencies = [
  "clap",
  "num",
  "pyo3",
  "regex",
- "serde",
  "serde_json",
 ]
 
@@ -384,7 +383,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
- "serde_derive",
 ]
 
 [[package]]

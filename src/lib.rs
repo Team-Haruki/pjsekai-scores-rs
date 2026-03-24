@@ -29,6 +29,6 @@ use pyo3::prelude::*;
 
 #[cfg(feature = "python")]
 #[pymodule]
-fn pjsekai_scores(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn pjsekai_scores_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     python::register(m)
 }
