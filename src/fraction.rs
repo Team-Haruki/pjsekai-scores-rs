@@ -139,12 +139,7 @@ impl fmt::Display for Fraction {
             write!(f, "{}/{}", self.0.numer(), self.0.denom())
         } else {
             let remainder = *self - Fraction::from_integer(i);
-            write!(
-                f,
-                "{i}.+{}/{}",
-                remainder.0.numer(),
-                remainder.0.denom()
-            )
+            write!(f, "{i}.+{}/{}", remainder.0.numer(), remainder.0.denom())
         }
     }
 }

@@ -1,5 +1,5 @@
-use super::{NoteData, NoteIdx, NO_NOTE};
 use super::tap::Tap;
+use super::{NO_NOTE, NoteData, NoteIdx};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]

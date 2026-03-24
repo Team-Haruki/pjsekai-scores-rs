@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::fs;
 
 use crate::fraction::Fraction;
-use crate::line::{Line, ParsedItem, SpeedDefinition, TicksPerBeat, BpmDefinition, BpmReference, SpeedControl};
+use crate::line::{
+    BpmDefinition, BpmReference, Line, ParsedItem, SpeedControl, SpeedDefinition, TicksPerBeat,
+};
 use crate::meta::Meta;
 use crate::notes::event::Event;
 use crate::notes::slide::SlideType;
-use crate::notes::{NoteData, NoteIdx, NO_NOTE};
+use crate::notes::{NO_NOTE, NoteData, NoteIdx};
 
 /// The main score container. Holds all parsed notes in an arena
 /// and events in a sorted list.
@@ -106,7 +108,11 @@ impl Score {
     /// Multi-pass note linking algorithm matching Python's _init_notes
     pub fn init_notes(&mut self) {
         // Sort notes by bar position
-        self.notes.sort_by(|a, b| a.bar().partial_cmp(&b.bar()).unwrap_or(std::cmp::Ordering::Equal));
+        self.notes.sort_by(|a, b| {
+            a.bar()
+                .partial_cmp(&b.bar())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let n = self.notes.len();
         let mut note_deleted = vec![false; n];
@@ -130,10 +136,7 @@ impl Score {
                 continue;
             }
 
-            note_indexes
-                .entry(self.notes[i].bar())
-                .or_default()
-                .push(i);
+            note_indexes.entry(self.notes[i].bar()).or_default().push(i);
         }
 
         // Pass 2: Associate Directional notes with Tap notes
@@ -189,7 +192,10 @@ impl Score {
                         continue;
                     }
                     let tap = &self.notes[j];
-                    if tap.bar() == slide_bar && tap.lane() == slide_lane && tap.width() == slide_width {
+                    if tap.bar() == slide_bar
+                        && tap.lane() == slide_lane
+                        && tap.width() == slide_width
+                    {
                         note_deleted[j] = true;
                         if let NoteData::Slide(_, ref mut s) = self.notes[i] {
                             s.tap_idx = j;
@@ -204,9 +210,15 @@ impl Score {
                         continue;
                     }
                     let dir = &self.notes[j];
-                    if dir.bar() == slide_bar && dir.lane() == slide_lane && dir.width() == slide_width {
+                    if dir.bar() == slide_bar
+                        && dir.lane() == slide_lane
+                        && dir.width() == slide_width
+                    {
                         note_deleted[j] = true;
-                        let dir_tap_idx = self.notes[j].as_directional().map(|d| d.tap_idx).unwrap_or(NO_NOTE);
+                        let dir_tap_idx = self.notes[j]
+                            .as_directional()
+                            .map(|d| d.tap_idx)
+                            .unwrap_or(NO_NOTE);
                         if let NoteData::Slide(_, ref mut s) = self.notes[i] {
                             s.directional_idx = j;
                             if dir_tap_idx != NO_NOTE {
@@ -218,7 +230,8 @@ impl Score {
             }
 
             // Chain slides: find next slide with same channel and decoration
-            let (slide_type, channel, decoration) = if let NoteData::Slide(_, ref s) = self.notes[i] {
+            let (slide_type, channel, decoration) = if let NoteData::Slide(_, ref s) = self.notes[i]
+            {
                 (self.notes[i].note_type(), s.channel, s.decoration)
             } else {
                 continue;
@@ -236,7 +249,8 @@ impl Score {
                         continue;
                     }
                     if let NoteData::Slide(_, ref next_s) = self.notes[j]
-                        && next_s.channel == channel && next_s.decoration == decoration
+                        && next_s.channel == channel
+                        && next_s.decoration == decoration
                     {
                         // Set next pointer
                         if let NoteData::Slide(_, ref mut s) = self.notes[i] {
@@ -258,7 +272,11 @@ impl Score {
 
     /// Merge consecutive events at the same bar position
     pub fn init_events(&mut self) {
-        self.events.sort_by(|a, b| a.bar.partial_cmp(&b.bar).unwrap_or(std::cmp::Ordering::Equal));
+        self.events.sort_by(|a, b| {
+            a.bar
+                .partial_cmp(&b.bar)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut merged: Vec<Event> = Vec::new();
         for event in &self.events {
@@ -308,10 +326,20 @@ impl Score {
         let timed = self.timed_events().to_vec();
         // Binary search: find last event with bar <= target
         let idx = match timed.binary_search_by(|probe| {
-            probe.1.bar.partial_cmp(&bar).unwrap_or(std::cmp::Ordering::Equal)
+            probe
+                .1
+                .bar
+                .partial_cmp(&bar)
+                .unwrap_or(std::cmp::Ordering::Equal)
         }) {
             Ok(i) => i,
-            Err(i) => if i > 0 { i - 1 } else { 0 },
+            Err(i) => {
+                if i > 0 {
+                    i - 1
+                } else {
+                    0
+                }
+            }
         };
 
         let (t, ref e) = timed[idx];
@@ -353,7 +381,7 @@ impl Score {
             let bar_length = event.bar_length.unwrap_or(Fraction::from_integer(4));
             let event_time = (bar_length * Fraction::from_integer(60) / bpm
                 * (events[i + 1].bar - event.bar))
-            .to_f64();
+                .to_f64();
 
             if t + event_time > time {
                 break;

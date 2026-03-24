@@ -1,14 +1,14 @@
-pub mod tap;
 pub mod directional;
-pub mod slide;
 pub mod event;
+pub mod slide;
+pub mod tap;
 
 use crate::fraction::Fraction;
 
-pub use tap::{Tap, TapType};
 pub use directional::{Directional, DirectionalType};
-pub use slide::{Slide, SlideType};
 pub use event::Event;
+pub use slide::{Slide, SlideType};
+pub use tap::{Tap, TapType};
 
 /// Index into the note arena
 pub type NoteIdx = usize;
@@ -97,23 +97,43 @@ impl NoteData {
     }
 
     pub fn as_tap(&self) -> Option<&Tap> {
-        if let NoteData::Tap(_, t) = self { Some(t) } else { None }
+        if let NoteData::Tap(_, t) = self {
+            Some(t)
+        } else {
+            None
+        }
     }
 
     pub fn as_directional(&self) -> Option<&Directional> {
-        if let NoteData::Directional(_, d) = self { Some(d) } else { None }
+        if let NoteData::Directional(_, d) = self {
+            Some(d)
+        } else {
+            None
+        }
     }
 
     pub fn as_slide(&self) -> Option<&Slide> {
-        if let NoteData::Slide(_, s) = self { Some(s) } else { None }
+        if let NoteData::Slide(_, s) = self {
+            Some(s)
+        } else {
+            None
+        }
     }
 
     pub fn as_slide_mut(&mut self) -> Option<&mut Slide> {
-        if let NoteData::Slide(_, s) = self { Some(s) } else { None }
+        if let NoteData::Slide(_, s) = self {
+            Some(s)
+        } else {
+            None
+        }
     }
 
     pub fn as_directional_mut(&mut self) -> Option<&mut Directional> {
-        if let NoteData::Directional(_, d) = self { Some(d) } else { None }
+        if let NoteData::Directional(_, d) = self {
+            Some(d)
+        } else {
+            None
+        }
     }
 
     /// Check if this note is critical (delegates to type-specific logic)

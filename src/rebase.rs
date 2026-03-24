@@ -2,11 +2,11 @@ use serde_json::Value;
 
 use crate::fraction::Fraction;
 use crate::meta::Meta;
+use crate::notes::directional::Directional;
 use crate::notes::event::Event;
 use crate::notes::slide::Slide;
 use crate::notes::tap::Tap;
-use crate::notes::directional::Directional;
-use crate::notes::{NoteBase, NoteData, NO_NOTE};
+use crate::notes::{NO_NOTE, NoteBase, NoteData};
 use crate::score::Score;
 
 fn bar_to_hash(bar: Fraction) -> u64 {
@@ -95,7 +95,9 @@ impl Rebase {
             let note = &notes_snapshot[note_idx];
             let bar = note.bar();
             let key = bar_to_hash(bar);
-            bar_to_time.entry(key).or_insert_with(|| source.get_time(bar));
+            bar_to_time
+                .entry(key)
+                .or_insert_with(|| source.get_time(bar));
             // Also handle linked notes
             match note {
                 NoteData::Directional(_, dir) => {
@@ -116,7 +118,8 @@ impl Rebase {
                         let k = bar_to_hash(db);
                         bar_to_time.entry(k).or_insert_with(|| source.get_time(db));
                         if let Some(d) = notes_snapshot[slide.directional_idx].as_directional()
-                            && d.tap_idx != NO_NOTE && d.tap_idx != slide.tap_idx
+                            && d.tap_idx != NO_NOTE
+                            && d.tap_idx != slide.tap_idx
                         {
                             let dtb = notes_snapshot[d.tap_idx].bar();
                             let k = bar_to_hash(dtb);
@@ -154,7 +157,12 @@ impl Rebase {
                         let tap_base = notes_snapshot[dir.tap_idx].base();
                         let tap_bar = rebase_bar(tap_base.bar, &mut score);
                         score.notes.push(NoteData::Tap(
-                            NoteBase::new(tap_bar, tap_base.lane, tap_base.width, tap_base.note_type),
+                            NoteBase::new(
+                                tap_bar,
+                                tap_base.lane,
+                                tap_base.width,
+                                tap_base.note_type,
+                            ),
                             Tap,
                         ));
                     }
@@ -169,7 +177,12 @@ impl Rebase {
                         let tap_base = notes_snapshot[slide.tap_idx].base();
                         let tap_bar = rebase_bar(tap_base.bar, &mut score);
                         score.notes.push(NoteData::Tap(
-                            NoteBase::new(tap_bar, tap_base.lane, tap_base.width, tap_base.note_type),
+                            NoteBase::new(
+                                tap_bar,
+                                tap_base.lane,
+                                tap_base.width,
+                                tap_base.note_type,
+                            ),
                             Tap,
                         ));
                     }
@@ -177,16 +190,27 @@ impl Rebase {
                         let dir_base = notes_snapshot[slide.directional_idx].base();
                         let dir_bar = rebase_bar(dir_base.bar, &mut score);
                         score.notes.push(NoteData::Directional(
-                            NoteBase::new(dir_bar, dir_base.lane, dir_base.width, dir_base.note_type),
+                            NoteBase::new(
+                                dir_bar,
+                                dir_base.lane,
+                                dir_base.width,
+                                dir_base.note_type,
+                            ),
                             Directional::new(),
                         ));
                         if let Some(d) = notes_snapshot[slide.directional_idx].as_directional()
-                            && d.tap_idx != NO_NOTE && d.tap_idx != slide.tap_idx
+                            && d.tap_idx != NO_NOTE
+                            && d.tap_idx != slide.tap_idx
                         {
                             let dt_base = notes_snapshot[d.tap_idx].base();
                             let dt_bar = rebase_bar(dt_base.bar, &mut score);
                             score.notes.push(NoteData::Tap(
-                                NoteBase::new(dt_bar, dt_base.lane, dt_base.width, dt_base.note_type),
+                                NoteBase::new(
+                                    dt_bar,
+                                    dt_base.lane,
+                                    dt_base.width,
+                                    dt_base.note_type,
+                                ),
                                 Tap,
                             ));
                         }
@@ -206,10 +230,18 @@ impl Rebase {
                 score.events.push(new_event);
             }
         }
-        score.events.sort_by(|a, b| a.bar.partial_cmp(&b.bar).unwrap_or(std::cmp::Ordering::Equal));
+        score.events.sort_by(|a, b| {
+            a.bar
+                .partial_cmp(&b.bar)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Sort notes and re-link
-        score.notes.sort_by(|a, b| a.bar().partial_cmp(&b.bar()).unwrap_or(std::cmp::Ordering::Equal));
+        score.notes.sort_by(|a, b| {
+            a.bar()
+                .partial_cmp(&b.bar())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         score.init_notes();
         score.init_events();
 

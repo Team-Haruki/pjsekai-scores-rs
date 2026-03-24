@@ -78,9 +78,21 @@ impl Meta {
     pub fn has_field(name: &str) -> bool {
         matches!(
             name,
-            "title" | "subtitle" | "artist" | "genre" | "designer" | "difficulty"
-            | "playlevel" | "songid" | "wave" | "waveoffset" | "jacket"
-            | "background" | "movie" | "movieoffset" | "basebpm"
+            "title"
+                | "subtitle"
+                | "artist"
+                | "genre"
+                | "designer"
+                | "difficulty"
+                | "playlevel"
+                | "songid"
+                | "wave"
+                | "waveoffset"
+                | "jacket"
+                | "background"
+                | "movie"
+                | "movieoffset"
+                | "basebpm"
         )
     }
 }

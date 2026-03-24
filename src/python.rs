@@ -56,13 +56,27 @@ impl PyScore {
         songid: Option<String>,
         subtitle: Option<String>,
     ) {
-        if let Some(v) = title      { self.inner.meta.title = Some(v); }
-        if let Some(v) = artist     { self.inner.meta.artist = Some(v); }
-        if let Some(v) = difficulty { self.inner.meta.difficulty = Some(v); }
-        if let Some(v) = playlevel  { self.inner.meta.playlevel = Some(v); }
-        if let Some(v) = jacket     { self.inner.meta.jacket = Some(v); }
-        if let Some(v) = songid     { self.inner.meta.songid = Some(v); }
-        if let Some(v) = subtitle   { self.inner.meta.subtitle = Some(v); }
+        if let Some(v) = title {
+            self.inner.meta.title = Some(v);
+        }
+        if let Some(v) = artist {
+            self.inner.meta.artist = Some(v);
+        }
+        if let Some(v) = difficulty {
+            self.inner.meta.difficulty = Some(v);
+        }
+        if let Some(v) = playlevel {
+            self.inner.meta.playlevel = Some(v);
+        }
+        if let Some(v) = jacket {
+            self.inner.meta.jacket = Some(v);
+        }
+        if let Some(v) = songid {
+            self.inner.meta.songid = Some(v);
+        }
+        if let Some(v) = subtitle {
+            self.inner.meta.subtitle = Some(v);
+        }
     }
 
     /// Get the number of active notes
@@ -97,12 +111,16 @@ impl PyScore {
 
     /// Get all events as a list of Event objects
     fn events(&self) -> Vec<PyEvent> {
-        self.inner.events.iter().map(|e| PyEvent {
-            bar: e.bar.to_f64(),
-            bpm: e.bpm.as_ref().map(|b| b.to_f64()),
-            speed: e.speed,
-            text: e.text.clone(),
-        }).collect()
+        self.inner
+            .events
+            .iter()
+            .map(|e| PyEvent {
+                bar: e.bar.to_f64(),
+                bpm: e.bpm.as_ref().map(|b| b.to_f64()),
+                speed: e.speed,
+                text: e.text.clone(),
+            })
+            .collect()
     }
 }
 
@@ -139,9 +157,8 @@ impl PyRebase {
     /// Load from JSON string
     #[staticmethod]
     fn from_json(json_str: &str) -> PyResult<PyRebase> {
-        let rebase = Rebase::from_json(json_str).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {e}"))
-        })?;
+        let rebase = Rebase::from_json(json_str)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid JSON: {e}")))?;
         Ok(PyRebase { inner: rebase })
     }
 
@@ -213,31 +230,49 @@ impl PyDrawing {
         };
 
         Ok(PyDrawing {
-            inner: Drawing::new(note_host, style_sheet, skill, mm, target_segment_seconds, generator),
+            inner: Drawing::new(
+                note_host,
+                style_sheet,
+                skill,
+                mm,
+                target_segment_seconds,
+                generator,
+            ),
         })
     }
 
     /// Generate SVG string from a score
     #[pyo3(signature = (score, lyric=None))]
     fn svg(&mut self, score: &mut PyScore, lyric: Option<&PyLyric>) -> String {
-        self.inner
-            .svg(&mut score.inner, lyric.map(|l| &l.inner))
+        self.inner.svg(&mut score.inner, lyric.map(|l| &l.inner))
     }
 
     #[getter]
-    fn note_size(&self) -> i32 { self.inner.config.note_size }
+    fn note_size(&self) -> i32 {
+        self.inner.config.note_size
+    }
     #[setter]
-    fn set_note_size(&mut self, v: i32) { self.inner.config.note_size = v; }
+    fn set_note_size(&mut self, v: i32) {
+        self.inner.config.note_size = v;
+    }
 
     #[getter]
-    fn time_height(&self) -> f64 { self.inner.config.time_height }
+    fn time_height(&self) -> f64 {
+        self.inner.config.time_height
+    }
     #[setter]
-    fn set_time_height(&mut self, v: f64) { self.inner.config.time_height = v; }
+    fn set_time_height(&mut self, v: f64) {
+        self.inner.config.time_height = v;
+    }
 
     #[getter]
-    fn lane_width(&self) -> i32 { self.inner.config.lane_width }
+    fn lane_width(&self) -> i32 {
+        self.inner.config.lane_width
+    }
     #[setter]
-    fn set_lane_width(&mut self, v: i32) { self.inner.config.lane_width = v; }
+    fn set_lane_width(&mut self, v: i32) {
+        self.inner.config.lane_width = v;
+    }
 }
 
 /// Convenience function: parse a .sus file and generate SVG in one call
@@ -254,9 +289,8 @@ fn sus_to_svg(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
 ) -> PyResult<String> {
-    let mut score = Score::open(sus_path).map_err(|e| {
-        pyo3::exceptions::PyIOError::new_err(format!("Failed to open score: {e}"))
-    })?;
+    let mut score = Score::open(sus_path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to open score: {e}")))?;
 
     if let Some(json_str) = rebase_json {
         let rebase = Rebase::from_json(json_str).map_err(|e| {
@@ -269,16 +303,39 @@ fn sus_to_svg(
 
     let mm = if let Some(meta_dict) = music_meta {
         Some(MusicMeta {
-            fever_end_time: meta_dict.get_item("fever_end_time")?.map(|v| v.extract::<f64>()).transpose()?.unwrap_or(0.0),
-            fever_score: meta_dict.get_item("fever_score")?.map(|v| v.extract::<f64>()).transpose()?.unwrap_or(0.0),
-            skill_score_solo: meta_dict.get_item("skill_score_solo")?.map(|v| v.extract::<Vec<f64>>()).transpose()?.unwrap_or_default(),
-            skill_score_multi: meta_dict.get_item("skill_score_multi")?.map(|v| v.extract::<Vec<f64>>()).transpose()?.unwrap_or_default(),
+            fever_end_time: meta_dict
+                .get_item("fever_end_time")?
+                .map(|v| v.extract::<f64>())
+                .transpose()?
+                .unwrap_or(0.0),
+            fever_score: meta_dict
+                .get_item("fever_score")?
+                .map(|v| v.extract::<f64>())
+                .transpose()?
+                .unwrap_or(0.0),
+            skill_score_solo: meta_dict
+                .get_item("skill_score_solo")?
+                .map(|v| v.extract::<Vec<f64>>())
+                .transpose()?
+                .unwrap_or_default(),
+            skill_score_multi: meta_dict
+                .get_item("skill_score_multi")?
+                .map(|v| v.extract::<Vec<f64>>())
+                .transpose()?
+                .unwrap_or_default(),
         })
     } else {
         None
     };
 
-    let mut drawing = Drawing::new(note_host, style_sheet, skill, mm, target_segment_seconds, generator);
+    let mut drawing = Drawing::new(
+        note_host,
+        style_sheet,
+        skill,
+        mm,
+        target_segment_seconds,
+        generator,
+    );
     Ok(drawing.svg(&mut score, lyric.as_ref()))
 }
 

@@ -3,8 +3,8 @@ use std::sync::LazyLock;
 
 use crate::fraction::Fraction;
 use crate::meta::Meta;
-use crate::notes::event::Event;
 use crate::notes::directional::Directional;
+use crate::notes::event::Event;
 use crate::notes::slide::Slide;
 use crate::notes::tap::Tap;
 use crate::notes::{NoteBase, NoteData};
@@ -21,7 +21,8 @@ static RE_TAP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{3})1(.)$").u
 static RE_SLIDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{3})3(.)(.)$").unwrap());
 static RE_DIRECTIONAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{3})5(.)$").unwrap());
 static RE_DECO_SLIDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{3})9(.)(.)$").unwrap());
-static RE_TICKS_PER_BEAT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"^"ticks_per_beat\s+(\d+)"$"#).unwrap());
+static RE_TICKS_PER_BEAT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"^"ticks_per_beat\s+(\d+)"$"#).unwrap());
 
 /// BPM definition from the score file
 #[derive(Debug, Clone)]
