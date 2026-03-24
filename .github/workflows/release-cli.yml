@@ -24,7 +24,7 @@ jobs:
             os: macos-15
             ext: ""
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15
             ext: ""
           - target: x86_64-pc-windows-msvc
             os: windows-latest
@@ -54,7 +54,7 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/pjsekai-scores-rs${{ matrix.ext }} \
              dist/pjsekai-scores-rs-${{ matrix.target }}${{ matrix.ext }}
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: cli-${{ matrix.target }}
           path: dist/
@@ -65,7 +65,7 @@ jobs:
     needs: build
     if: github.event_name == 'release'
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v6
         with:
           pattern: cli-*
           merge-multiple: true
