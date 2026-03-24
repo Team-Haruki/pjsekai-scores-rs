@@ -40,7 +40,7 @@ The dominant win is SVG generation: Rust replaces thousands of Python `svgwrite`
 ## CLI Usage
 
 ```
-pjsekai-scores <SCORE> [OPTIONS]
+pjsekai-scores-rs <SCORE> [OPTIONS]
 
 Arguments:
   <SCORE>  The .sus score file
@@ -61,13 +61,13 @@ Options:
 
 ```bash
 # Basic conversion
-pjsekai-scores master.sus -o master.svg
+pjsekai-scores-rs master.sus -o master.svg
 
 # With custom BPM rebase and lyrics
-pjsekai-scores master.sus --rebase rebase.json --lyric lyrics.txt -o master.svg
+pjsekai-scores-rs master.sus --rebase rebase.json --lyric lyrics.txt -o master.svg
 
 # With custom CSS theme and local note assets
-pjsekai-scores master.sus --css dark.css --note-host /path/to/notes -o master.svg
+pjsekai-scores-rs master.sus --css dark.css --note-host /path/to/notes -o master.svg
 ```
 
 ---
@@ -130,7 +130,13 @@ cargo build --release
 ### Installation
 
 ```bash
-pip install pjsekai_scores_rs-0.1.0-*.whl
+pip install pjsekai-scores-rs
+```
+
+or with uv:
+
+```bash
+uv add pjsekai-scores-rs
 ```
 
 Or build and install from source (requires [maturin](https://github.com/PyO3/maturin)):
@@ -138,16 +144,6 @@ Or build and install from source (requires [maturin](https://github.com/PyO3/mat
 ```bash
 maturin develop --release
 ```
-
-### Available wheels
-
-| File | Platform |
-|---|---|
-| `cp314-cp314t-macosx_11_0_arm64.whl` | macOS ARM64 / Python 3.14t |
-| `cp313-cp313-macosx_11_0_arm64.whl` | macOS ARM64 / Python 3.13 |
-| `cp314-cp314t-manylinux_2_17_x86_64.whl` | Linux x64 / Python 3.14t |
-| `cp313-cp313-manylinux_2_17_x86_64.whl` | Linux x64 / Python 3.13 |
-| `cp314-cp314t-win_amd64.whl` | Windows x64 / Python 3.14t |
 
 ### Python API
 
@@ -274,12 +270,12 @@ pjsekai-scores-rs/
     ├── rebase.rs       # BPM/timing rebase transformation
     ├── drawing.rs      # SVG renderer (~750 lines, direct String building)
     ├── python.rs       # PyO3 bindings (Score, Drawing, Rebase, Lyric, Event)
+    ├── notes.rs        # NoteData enum + NoteBase + arena index pattern
     └── notes/
-        ├── mod.rs      # NoteData enum + NoteBase + arena index pattern
-        ├── tap.rs      # TapType (8 variants)
+        ├── tap.rs          # TapType (8 variants)
         ├── directional.rs  # DirectionalType (6 variants)
-        ├── slide.rs    # SlideType (4 variants) + Bézier path data
-        └── event.rs    # Event struct (BPM / bar-length / speed / text)
+        ├── slide.rs        # SlideType (4 variants) + Bézier path data
+        └── event.rs        # Event struct (BPM / bar-length / speed / text)
 ```
 
 ## Notes

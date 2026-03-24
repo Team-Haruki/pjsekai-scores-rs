@@ -1,0 +1,79 @@
+name: Release CLI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build CLI (${{ matrix.target }})
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            ext: ""
+          - target: aarch64-apple-darwin
+            os: macos-15
+            ext: ""
+          - target: x86_64-apple-darwin
+            os: macos-13
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set version from tag
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            sed -i '' "1,/^version = .*/{s/^version = .*/version = \"${VERSION}\"/;}" Cargo.toml
+          else
+            sed -i "0,/^version = .*/s//version = \"${VERSION}\"/" Cargo.toml
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} --bin pjsekai-scores-rs
+      - name: Package binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/pjsekai-scores-rs${{ matrix.ext }} \
+             dist/pjsekai-scores-rs-${{ matrix.target }}${{ matrix.ext }}
+      - uses: actions/upload-artifact@v5
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/
+
+  publish:
+    name: Upload to GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'release'
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: dist/
+      - name: Upload release assets
+        run: |
+          for f in dist/*; do
+            gh release upload "${{ github.ref_name }}" "$f" --clobber
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
