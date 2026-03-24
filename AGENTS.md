@@ -40,7 +40,7 @@ PYO3_CROSS=1 PYO3_CROSS_PYTHON_VERSION=3.14 \
 
 ```
 src/
-├── main.rs         CLI entry point (clap)
+├── main.rs         CLI entry point (clap); binary name: pjsekai-scores-rs
 ├── lib.rs          Crate root; registers PyO3 module under `python` feature
 ├── fraction.rs     Exact rational arithmetic (num::Rational64 wrapper)
 ├── meta.rs         Score metadata struct
@@ -50,17 +50,26 @@ src/
 ├── rebase.rs       BPM/timing rebase transformation
 ├── drawing.rs      SVG renderer — direct String building, ~750 lines
 ├── python.rs       All PyO3 bindings (PyScore, PyDrawing, PyRebase, PyLyric, PyEvent)
+├── notes.rs        NoteData enum, arena index pattern (NoteIdx = usize)
 └── notes/
-    ├── mod.rs      NoteData enum, arena index pattern (NoteIdx = usize)
-    ├── tap.rs      TapType (8 variants)
-    ├── directional.rs DirectionalType (6 variants)
-    ├── slide.rs    SlideType + Bézier path data
-    └── event.rs    Event (BPM / bar-length / speed / text)
+    ├── tap.rs          TapType (8 variants)
+    ├── directional.rs  DirectionalType (6 variants)
+    ├── slide.rs        SlideType + Bézier path data
+    └── event.rs        Event (BPM / bar-length / speed / text)
 ```
 
 ---
 
 ## Key architectural decisions
+
+### `Score::parse` and `impl std::str::FromStr`
+`Score` implements `std::str::FromStr`. Use `Score::parse(content)` as the public Rust method, or `content.parse::<Score>()` via the trait. The Python binding `Score.from_str(s)` delegates to `s.parse::<Score>().unwrap()`.
+
+### `DrawingConfig.generator` / `Drawing::new` signature
+`DrawingConfig` carries a `generator: String` field (default `"HarukiBot NEO"`). `Drawing::new` accepts `generator: Option<String>` as the 6th argument — `None` keeps the default. The SVG subtitle reads from this field. Python exposes it as a `generator=None` keyword argument on `Drawing(...)` and `sus_to_svg(...)`.
+
+### `ParsedItem::Meta` is boxed
+`ParsedItem::Meta(Box<Meta>)` — the variant wraps `Box<Meta>` to avoid a large-enum-variant clippy warning. Call sites use `self.meta.merge(&m)` unchanged because `Box<Meta>` auto-derefs.
 
 ### Arena pattern for notes
 Notes are stored in `Vec<NoteData>` on `Score`. Cross-references (slide head/tail/next) use `NoteIdx = usize` with `NO_NOTE = usize::MAX`. This avoids Rust's circular reference restrictions without `Rc`/`RefCell`.
@@ -99,13 +108,14 @@ All `#[pyclass]` types own their data (no `Rc`/`RefCell`) so they are `Send + Sy
 The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build time, removing the need for a Windows Python installation when cross-compiling.
 
 ### API differences from original Python
-| Python (`pjsekai.scores`) | Rust (`pjsekai_scores`) |
+| Python (`pjsekai.scores`) | Rust (`pjsekai_scores_rs`) |
 |---|---|
 | `Drawing(score=score)` + `drawing.svg().saveas(path)` | `Drawing(...)` + `drawing.svg(score)` → `str` |
 | `score.meta.xxx = val` | `score.set_meta(xxx=val)` |
 | `Rebase.load_from_dict(d).rebase(score)` | `Rebase.from_dict(d).apply(score)` |
 | `Lyric.load(file_obj)` | `Lyric.load(string)` |
 | `score.events` (attribute) | `score.events()` (method) |
+| *(no generator param)* | `Drawing(generator="…")` / `sus_to_svg(generator="…")` |
 
 ---
 
@@ -116,3 +126,4 @@ The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build
 - **Do not call `maturin develop` with the 3.14t venv** — it fails; use `maturin build -i python3.14t` then `uv pip install`.
 - **Do not use `r#"..."#`** for strings that embed `href="#` — use `r##"..."##`.
 - **Do not move `let cfg = &self.config`** before the `build_skill_covers()` call in `drawing.rs`.
+- **Do not rename `notes.rs` back to `notes/mod.rs`** — the module root lives at `src/notes.rs`; submodules stay in `src/notes/`.
