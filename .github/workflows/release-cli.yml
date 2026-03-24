@@ -65,6 +65,7 @@ jobs:
     needs: build
     if: github.event_name == 'release'
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v6
         with:
           pattern: cli-*
