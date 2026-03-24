@@ -25,14 +25,6 @@ Measured in production against the original Python implementation, both running 
 
 > **Environment:** Debian 12 · Intel Xeon Platinum 8272CL × 8 cores @ 2.594 GHz · Python 3.13 · AMD64
 
-Phase-level breakdown:
-
-| Phase | Estimated Speedup |
-|---|---|
-| `.sus` parsing | ~8–10× |
-| Note linking (3-pass) | ~10–12× |
-| SVG generation | ~30–40× |
-
 The dominant win is SVG generation: Rust replaces thousands of Python `svgwrite` object allocations and DOM traversals with direct `String` building and pre-computed layout arithmetic.
 
 ---
