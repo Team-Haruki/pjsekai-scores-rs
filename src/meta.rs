@@ -23,22 +23,23 @@ impl Meta {
         Meta::default()
     }
 
-    /// Merge operator matching Python's `__or__`: self takes priority for non-None fields
+    /// Merge operator matching Python's `__or__`: self takes priority using Python's
+    /// falsy semantics (empty strings are treated as missing, matching `self.x or other.x`)
     pub fn merge(&self, other: &Meta) -> Meta {
         Meta {
-            title: self.title.clone().or_else(|| other.title.clone()),
-            subtitle: self.subtitle.clone().or_else(|| other.subtitle.clone()),
-            artist: self.artist.clone().or_else(|| other.artist.clone()),
-            genre: self.genre.clone().or_else(|| other.genre.clone()),
-            designer: self.designer.clone().or_else(|| other.designer.clone()),
-            difficulty: self.difficulty.clone().or_else(|| other.difficulty.clone()),
-            playlevel: self.playlevel.clone().or_else(|| other.playlevel.clone()),
-            songid: self.songid.clone().or_else(|| other.songid.clone()),
-            wave: self.wave.clone().or_else(|| other.wave.clone()),
-            waveoffset: self.waveoffset.clone().or_else(|| other.waveoffset.clone()),
-            jacket: self.jacket.clone().or_else(|| other.jacket.clone()),
-            background: self.background.clone().or_else(|| other.background.clone()),
-            movie: self.movie.clone().or_else(|| other.movie.clone()),
+            title: or_falsy(&self.title, &other.title),
+            subtitle: or_falsy(&self.subtitle, &other.subtitle),
+            artist: or_falsy(&self.artist, &other.artist),
+            genre: or_falsy(&self.genre, &other.genre),
+            designer: or_falsy(&self.designer, &other.designer),
+            difficulty: or_falsy(&self.difficulty, &other.difficulty),
+            playlevel: or_falsy(&self.playlevel, &other.playlevel),
+            songid: or_falsy(&self.songid, &other.songid),
+            wave: or_falsy(&self.wave, &other.wave),
+            waveoffset: or_falsy(&self.waveoffset, &other.waveoffset),
+            jacket: or_falsy(&self.jacket, &other.jacket),
+            background: or_falsy(&self.background, &other.background),
+            movie: or_falsy(&self.movie, &other.movie),
             movieoffset: self.movieoffset.or(other.movieoffset),
             basebpm: self.basebpm.or(other.basebpm),
         }
@@ -94,5 +95,13 @@ impl Meta {
                 | "movieoffset"
                 | "basebpm"
         )
+    }
+}
+
+/// Python-style falsy merge for Option<String>: None and empty strings fall through
+fn or_falsy(a: &Option<String>, b: &Option<String>) -> Option<String> {
+    match a {
+        Some(s) if !s.is_empty() => Some(s.clone()),
+        _ => b.clone(),
     }
 }

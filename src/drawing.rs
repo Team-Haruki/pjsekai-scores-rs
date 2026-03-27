@@ -1571,11 +1571,31 @@ fn escape_xml(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Format a float like Python's %g (remove trailing zeros)
+/// Format a float like Python's %g (6 significant digits, trailing zeros removed,
+/// scientific notation for very small/large values)
 fn format_g(v: f64) -> String {
-    if v == v.floor() {
-        format!("{}", v as i64)
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let abs_v = v.abs();
+    let exp = abs_v.log10().floor() as i32;
+
+    if (-4..6).contains(&exp) {
+        let decimals = (5 - exp).max(0) as usize;
+        let s = format!("{:.prec$}", v, prec = decimals);
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
     } else {
-        format!("{v}")
+        let mantissa = v / 10.0_f64.powi(exp);
+        let s = format!("{mantissa:.5}");
+        let m = s.trim_end_matches('0').trim_end_matches('.');
+        if exp >= 0 {
+            format!("{m}e+{exp:02}")
+        } else {
+            format!("{m}e-{:02}", -exp)
+        }
     }
 }

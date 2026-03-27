@@ -19,8 +19,8 @@ pub struct Score {
     /// Indices into `notes` that are "active" (not deleted during linking)
     pub active_notes: Vec<NoteIdx>,
     pub events: Vec<Event>,
-    /// Cached timed events (time_seconds, merged_event)
-    pub timed_events_cache: Option<Vec<(f64, Event)>>,
+    /// Cached timed events (time_fraction, merged_event) — uses Fraction for exact arithmetic
+    pub timed_events_cache: Option<Vec<(Fraction, Event)>>,
 }
 
 impl Score {
@@ -292,14 +292,15 @@ impl Score {
         self.timed_events_cache = None;
     }
 
-    /// Compute timed events: (elapsed_seconds, merged_event) list
-    pub fn timed_events(&mut self) -> &[(f64, Event)] {
+    /// Compute timed events: (elapsed_time_fraction, merged_event) list
+    /// Uses Fraction for exact arithmetic matching Python's Fraction accumulation
+    pub fn timed_events(&mut self) -> &[(Fraction, Event)] {
         if let Some(ref cached) = self.timed_events_cache {
             return cached;
         }
 
-        let mut timed: Vec<(f64, Event)> = Vec::new();
-        let mut t: f64 = 0.0;
+        let mut timed: Vec<(Fraction, Event)> = Vec::new();
+        let mut t = Fraction::zero();
         let mut e = Event::new(Fraction::zero());
         e.bpm = Some(Fraction::from_integer(120));
         e.bar_length = Some(Fraction::from_integer(4));
@@ -309,13 +310,13 @@ impl Score {
             let bpm = e.bpm.unwrap_or(Fraction::from_integer(120));
             let bar_length = e.bar_length.unwrap_or(Fraction::from_integer(4));
             let delta_bar = event.bar - e.bar;
-            t += (delta_bar * bar_length * Fraction::from_integer(60) / bpm).to_f64();
+            t = t + delta_bar * bar_length * Fraction::from_integer(60) / bpm;
             e = e.merge(event);
             timed.push((t, e.clone()));
         }
 
         if timed.is_empty() {
-            timed.push((0.0, e));
+            timed.push((Fraction::zero(), e));
         }
 
         self.timed_events_cache.insert(timed)
@@ -342,11 +343,11 @@ impl Score {
             }
         };
 
-        let (t, ref e) = timed[idx];
+        let (ref t, ref e) = timed[idx];
         let bpm = e.bpm.unwrap_or(Fraction::from_integer(120));
         let bar_length = e.bar_length.unwrap_or(Fraction::from_integer(4));
         let delta = bar - e.bar;
-        let time = t + (bar_length * Fraction::from_integer(60) / bpm * delta).to_f64();
+        let time = (*t + bar_length * Fraction::from_integer(60) / bpm * delta).to_f64();
         (time, e.clone())
     }
 
