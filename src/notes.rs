@@ -139,7 +139,7 @@ impl NoteData {
     /// Check if this note is critical (delegates to type-specific logic)
     pub fn is_critical(&self, arena: &[NoteData]) -> bool {
         match self {
-            NoteData::Tap(_, t) => t.is_critical(),
+            NoteData::Tap(b, _) => Tap::is_critical_type(b.note_type),
             NoteData::Directional(_, d) => d.is_critical(arena),
             NoteData::Slide(_, s) => s.is_critical(arena),
         }
@@ -148,7 +148,7 @@ impl NoteData {
     /// Check if this note is a trend note
     pub fn is_trend(&self, arena: &[NoteData]) -> bool {
         match self {
-            NoteData::Tap(_, t) => t.is_trend(),
+            NoteData::Tap(b, _) => Tap::is_trend_type(b.note_type),
             NoteData::Directional(_, d) => d.is_trend(arena),
             NoteData::Slide(_, s) => s.is_trend(arena),
         }
@@ -157,7 +157,7 @@ impl NoteData {
     /// Check if this note should not be rendered
     pub fn is_none(&self, arena: &[NoteData]) -> bool {
         match self {
-            NoteData::Tap(_, t) => t.is_none(),
+            NoteData::Tap(b, _) => Tap::is_none_type(b.note_type),
             NoteData::Directional(_, _d) => false,
             NoteData::Slide(_, s) => s.is_none(arena),
         }
@@ -167,7 +167,7 @@ impl NoteData {
     /// Returns Some(true/false) or None if not applicable.
     pub fn is_tick(&self, arena: &[NoteData]) -> Option<bool> {
         match self {
-            NoteData::Tap(_, t) => t.is_tick(),
+            NoteData::Tap(b, t) => t.is_tick_with_type(b.note_type),
             NoteData::Directional(_, d) => d.is_tick(arena),
             NoteData::Slide(b, s) => s.is_tick(arena, b.note_type),
         }
