@@ -123,9 +123,9 @@ impl Drawing {
     /// Generate a complete SVG string from a score
     pub fn svg(&mut self, score: &mut Score, lyric: Option<&Lyric>) -> String {
         let n_bars = score
-            .notes
+            .active_notes
             .last()
-            .map(|n| n.bar().ceil() as i32)
+            .map(|&idx| score.notes[idx].bar().ceil() as i32)
             .unwrap_or(0);
 
         // Build skill cover objects (mutates self)
@@ -148,7 +148,7 @@ impl Drawing {
         for i in 0..=n_bars {
             let e = score.get_event(Fraction::from_integer(i as i64));
             let current_height = cfg.time_height
-                * score.get_time_delta(
+                * score.get_time_delta_f64(
                     Fraction::from_integer(bar_start as i64),
                     Fraction::from_integer(i as i64),
                 );
@@ -347,7 +347,7 @@ impl Drawing {
             if e.text.as_deref() != Some("SKILL") {
                 continue;
             }
-            let skill_time = score.get_time(e.bar);
+            let skill_time = score.get_time_f64(e.bar);
             self.special_cover_objects.push(CoverObject::Rect {
                 bar_from: score.get_bar_by_time(skill_time - 5.0 / 60.0),
                 css_class: "skill-great".to_string(),
@@ -495,7 +495,7 @@ impl Drawing {
         let bar_start_f = Fraction::from_integer(bar_start as i64);
         let bar_stop_f = Fraction::from_integer(bar_stop as i64);
 
-        let height = cfg.time_height * score.get_time_delta(bar_start_f, bar_stop_f);
+        let height = cfg.time_height * score.get_time_delta_f64(bar_start_f, bar_stop_f);
         let width = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64 * 2.0;
 
         let mut slide_paths = String::new();
@@ -594,7 +594,7 @@ impl Drawing {
                     );
                 } else {
                     // is_tick == false: just a short line
-                    let y = cfg.time_height * score.get_time_delta(note.bar(), bar_stop_f)
+                    let y = cfg.time_height * score.get_time_delta_f64(note.bar(), bar_stop_f)
                         + cfg.time_padding as f64;
                     write!(
                         tick_texts,
@@ -747,7 +747,7 @@ impl Drawing {
                     {
                         continue;
                     }
-                    let y = cfg.time_height * score.get_time_delta(*bar_from, bar_stop_f)
+                    let y = cfg.time_height * score.get_time_delta_f64(*bar_from, bar_stop_f)
                         + cfg.time_padding as f64;
                     let x = cfg.lane_width as f64 * cfg.n_lanes as f64
                         + cfg.lane_padding as f64 * 2.0
@@ -777,9 +777,9 @@ impl Drawing {
                     if cover_to <= cover_from {
                         continue;
                     }
-                    let y = cfg.time_height * score.get_time_delta(cover_to, bar_stop_f)
+                    let y = cfg.time_height * score.get_time_delta_f64(cover_to, bar_stop_f)
                         + cfg.time_padding as f64;
-                    let h = cfg.time_height * score.get_time_delta(cover_from, cover_to);
+                    let h = cfg.time_height * score.get_time_delta_f64(cover_from, cover_to);
                     write!(
                         svg,
                         r#"<rect x="{}" y="{}" width="{}" height="{}" class="{}"/>"#,
@@ -810,8 +810,8 @@ impl Drawing {
         // Bar and beat lines
         for bar in bar_start..=bar_stop {
             let bar_f = Fraction::from_integer(bar as i64);
-            let y =
-                cfg.time_height * score.get_time_delta(bar_f, bar_stop_f) + cfg.time_padding as f64;
+            let y = cfg.time_height * score.get_time_delta_f64(bar_f, bar_stop_f)
+                + cfg.time_padding as f64;
             let x1 = cfg.lane_width as f64 * 0.0 + cfg.lane_padding as f64;
             let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64;
 
@@ -835,7 +835,7 @@ impl Drawing {
 
             for beat_i in 1..bar_length {
                 let beat_bar = bar_f + Fraction::new(beat_i as i64, 1) / bar_length_frac;
-                let beat_y = cfg.time_height * score.get_time_delta(beat_bar, bar_stop_f)
+                let beat_y = cfg.time_height * score.get_time_delta_f64(beat_bar, bar_stop_f)
                     + cfg.time_padding as f64;
                 write!(
                     svg,
@@ -863,7 +863,7 @@ impl Drawing {
 
         for event in &all_events {
             if let Some(speed) = event.speed {
-                let y = cfg.time_height * score.get_time_delta(event.bar, bar_stop_f)
+                let y = cfg.time_height * score.get_time_delta_f64(event.bar, bar_stop_f)
                     + cfg.time_padding as f64;
                 let x1 = cfg.lane_padding as f64;
                 let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64;
@@ -904,7 +904,7 @@ impl Drawing {
                 || event.section.is_some()
                 || event.text.is_some();
 
-            let y = cfg.time_height * score.get_time_delta(event.bar, bar_stop_f)
+            let y = cfg.time_height * score.get_time_delta_f64(event.bar, bar_stop_f)
                 + cfg.time_padding as f64;
             write!(
                 svg,
@@ -958,7 +958,7 @@ impl Drawing {
                 || event.section.is_some()
                 || event.text.is_some();
 
-            let y = cfg.time_height * score.get_time_delta(event.bar, bar_stop_f)
+            let y = cfg.time_height * score.get_time_delta_f64(event.bar, bar_stop_f)
                 + cfg.time_padding as f64;
             write!(
                 svg,
@@ -985,7 +985,7 @@ impl Drawing {
                 {
                     continue;
                 }
-                let y = cfg.time_height * score.get_time_delta(word.bar, bar_stop_f)
+                let y = cfg.time_height * score.get_time_delta_f64(word.bar, bar_stop_f)
                     + cfg.time_padding as f64;
                 let x = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64;
                 write!(
@@ -1070,7 +1070,7 @@ impl Drawing {
             // Add among images
             for &among_idx in &amongs {
                 let among_bar = arena[among_idx].bar();
-                let y = cfg.time_height * score.get_time_delta(among_bar, bar_stop)
+                let y = cfg.time_height * score.get_time_delta_f64(among_bar, bar_stop)
                     + cfg.time_padding as f64;
                 let x_l = binary_solution_for_x(y, &l);
                 let x_r = binary_solution_for_x(y, &r);
@@ -1169,9 +1169,9 @@ impl Drawing {
         let slide_0 = &arena[idx0];
         let slide_1 = &arena[idx1];
 
-        let y_0 = cfg.time_height * score.get_time_delta(slide_0.bar(), bar_stop)
+        let y_0 = cfg.time_height * score.get_time_delta_f64(slide_0.bar(), bar_stop)
             + cfg.time_padding as f64;
-        let y_1 = cfg.time_height * score.get_time_delta(slide_1.bar(), bar_stop)
+        let y_1 = cfg.time_height * score.get_time_delta_f64(slide_1.bar(), bar_stop)
             + cfg.time_padding as f64;
 
         let ease_in = slide_0
@@ -1247,8 +1247,8 @@ impl Drawing {
         let cfg = &self.config;
         let note = &arena[note_idx];
 
-        let y =
-            cfg.time_height * score.get_time_delta(note.bar(), bar_stop) + cfg.time_padding as f64;
+        let y = cfg.time_height * score.get_time_delta_f64(note.bar(), bar_stop)
+            + cfg.time_padding as f64;
         let x = cfg.lane_width as f64 * (note.lane() as f64 - 2.5) + cfg.lane_padding as f64;
         let w = cfg.lane_width as f64 * (note.width() + 1) as f64;
         let h = cfg.lane_width as f64 / 64.0 * 56.0 * 2.0;
@@ -1314,8 +1314,8 @@ impl Drawing {
         let cfg = &self.config;
         let note = &arena[note_idx];
 
-        let y =
-            cfg.time_height * score.get_time_delta(note.bar(), bar_stop) + cfg.time_padding as f64;
+        let y = cfg.time_height * score.get_time_delta_f64(note.bar(), bar_stop)
+            + cfg.time_padding as f64;
         let x = cfg.lane_width as f64 * (note.lane() as f64 + note.width() as f64 / 2.0 - 2.0)
             + cfg.lane_padding as f64;
         let w = cfg.lane_width as f64 * 0.75;
@@ -1353,8 +1353,8 @@ impl Drawing {
         let cfg = &self.config;
         let note = &arena[note_idx];
 
-        let y =
-            cfg.time_height * score.get_time_delta(note.bar(), bar_stop) + cfg.time_padding as f64;
+        let y = cfg.time_height * score.get_time_delta_f64(note.bar(), bar_stop)
+            + cfg.time_padding as f64;
 
         if note.is_none(arena) {
             return;
@@ -1446,8 +1446,8 @@ impl Drawing {
     ) {
         let cfg = &self.config;
         let note = &arena[note_idx];
-        let y =
-            cfg.time_height * score.get_time_delta(note.bar(), bar_stop) + cfg.time_padding as f64;
+        let y = cfg.time_height * score.get_time_delta_f64(note.bar(), bar_stop)
+            + cfg.time_padding as f64;
 
         let next_idx = match next_idx {
             Some(idx) => idx,

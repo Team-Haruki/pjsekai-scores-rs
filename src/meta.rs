@@ -1,3 +1,5 @@
+use crate::fraction::Fraction;
+
 /// Chart metadata matching Python's Meta dataclass
 #[derive(Debug, Clone, Default)]
 pub struct Meta {
@@ -40,8 +42,8 @@ impl Meta {
             jacket: or_falsy(&self.jacket, &other.jacket),
             background: or_falsy(&self.background, &other.background),
             movie: or_falsy(&self.movie, &other.movie),
-            movieoffset: self.movieoffset.or(other.movieoffset),
-            basebpm: self.basebpm.or(other.basebpm),
+            movieoffset: or_falsy_f64(self.movieoffset, other.movieoffset),
+            basebpm: or_falsy_f64(self.basebpm, other.basebpm),
         }
     }
 
@@ -62,12 +64,12 @@ impl Meta {
             "background" => self.background = Some(value.to_string()),
             "movie" => self.movie = Some(value.to_string()),
             "movieoffset" => {
-                if let Ok(v) = value.parse::<f64>() {
+                if let Some(v) = parse_python_number(value) {
                     self.movieoffset = Some(v);
                 }
             }
             "basebpm" => {
-                if let Ok(v) = value.parse::<f64>() {
+                if let Some(v) = parse_python_number(value) {
                     self.basebpm = Some(v);
                 }
             }
@@ -104,4 +106,15 @@ fn or_falsy(a: &Option<String>, b: &Option<String>) -> Option<String> {
         Some(s) if !s.is_empty() => Some(s.clone()),
         _ => b.clone(),
     }
+}
+
+fn or_falsy_f64(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match a {
+        Some(v) if v != 0.0 => Some(v),
+        _ => b,
+    }
+}
+
+fn parse_python_number(s: &str) -> Option<f64> {
+    Fraction::parse(s).map(|f| f.to_f64())
 }

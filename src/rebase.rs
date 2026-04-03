@@ -9,10 +9,6 @@ use crate::notes::tap::Tap;
 use crate::notes::{NO_NOTE, NoteBase, NoteData};
 use crate::score::Score;
 
-fn bar_to_hash(bar: Fraction) -> u64 {
-    bar.to_f64().to_bits()
-}
-
 /// Rebase transformation: applies custom timing/BPM adjustments to a score
 pub struct Rebase {
     pub offset: f64,
@@ -90,40 +86,38 @@ impl Rebase {
         let notes_snapshot = source.notes.clone();
 
         // Pre-compute all source times we need
-        let mut bar_to_time: std::collections::HashMap<u64, f64> = std::collections::HashMap::new();
+        let mut bar_to_time: std::collections::HashMap<Fraction, Fraction> =
+            std::collections::HashMap::new();
         for &note_idx in &active_notes {
             let note = &notes_snapshot[note_idx];
             let bar = note.bar();
-            let key = bar_to_hash(bar);
             bar_to_time
-                .entry(key)
+                .entry(bar)
                 .or_insert_with(|| source.get_time(bar));
             // Also handle linked notes
             match note {
                 NoteData::Directional(_, dir) => {
                     if dir.tap_idx != NO_NOTE {
                         let tb = notes_snapshot[dir.tap_idx].bar();
-                        let k = bar_to_hash(tb);
-                        bar_to_time.entry(k).or_insert_with(|| source.get_time(tb));
+                        bar_to_time.entry(tb).or_insert_with(|| source.get_time(tb));
                     }
                 }
                 NoteData::Slide(_, slide) => {
                     if slide.tap_idx != NO_NOTE {
                         let tb = notes_snapshot[slide.tap_idx].bar();
-                        let k = bar_to_hash(tb);
-                        bar_to_time.entry(k).or_insert_with(|| source.get_time(tb));
+                        bar_to_time.entry(tb).or_insert_with(|| source.get_time(tb));
                     }
                     if slide.directional_idx != NO_NOTE {
                         let db = notes_snapshot[slide.directional_idx].bar();
-                        let k = bar_to_hash(db);
-                        bar_to_time.entry(k).or_insert_with(|| source.get_time(db));
+                        bar_to_time.entry(db).or_insert_with(|| source.get_time(db));
                         if let Some(d) = notes_snapshot[slide.directional_idx].as_directional()
                             && d.tap_idx != NO_NOTE
                             && d.tap_idx != slide.tap_idx
                         {
                             let dtb = notes_snapshot[d.tap_idx].bar();
-                            let k = bar_to_hash(dtb);
-                            bar_to_time.entry(k).or_insert_with(|| source.get_time(dtb));
+                            bar_to_time
+                                .entry(dtb)
+                                .or_insert_with(|| source.get_time(dtb));
                         }
                     }
                 }
@@ -132,7 +126,11 @@ impl Rebase {
         }
 
         let rebase_bar = |bar: Fraction, score: &mut Score| -> Fraction {
-            let source_time = bar_to_time.get(&bar_to_hash(bar)).copied().unwrap_or(0.0);
+            let source_time = bar_to_time
+                .get(&bar)
+                .copied()
+                .unwrap_or_else(Fraction::zero)
+                .to_f64();
             score.get_bar_by_time(source_time - self.offset)
         };
 
@@ -223,7 +221,7 @@ impl Rebase {
         let source_events = source.events.clone();
         for event in &source_events {
             if event.speed.is_some() || event.text.is_some() {
-                let source_time = source.get_time(event.bar);
+                let source_time = source.get_time(event.bar).to_f64();
                 let new_bar = score.get_bar_by_time(source_time - self.offset);
                 let mut new_event = event.clone();
                 new_event.bar = new_bar;

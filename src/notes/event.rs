@@ -57,37 +57,49 @@ impl Event {
 
     /// Merge operator matching Python's `__or__`: prefer other's non-None values
     pub fn merge(&self, other: &Event) -> Event {
+        debug_assert!(self.bar <= other.bar);
         Event {
             bar: other.bar,
-            bpm: other.bpm.or(self.bpm),
-            bar_length: other.bar_length.or(self.bar_length),
-            sentence_length: other.sentence_length.or(self.sentence_length),
-            speed: other.speed.or(self.speed),
-            section: other.section.clone().or_else(|| self.section.clone()),
-            text: other.text.clone().or_else(|| self.text.clone()),
+            bpm: or_falsy_fraction(other.bpm, self.bpm),
+            bar_length: or_falsy_fraction(other.bar_length, self.bar_length),
+            sentence_length: or_falsy_i32(other.sentence_length, self.sentence_length),
+            speed: or_falsy_f64(other.speed, self.speed),
+            section: or_falsy_string(&other.section, &self.section),
+            text: or_falsy_string(&other.text, &self.text),
         }
     }
 
     /// Merge in-place: update self with non-None values from other
     pub fn merge_from(&mut self, other: &Event) {
-        self.bar = other.bar;
-        if other.bpm.is_some() {
-            self.bpm = other.bpm;
-        }
-        if other.bar_length.is_some() {
-            self.bar_length = other.bar_length;
-        }
-        if other.sentence_length.is_some() {
-            self.sentence_length = other.sentence_length;
-        }
-        if other.speed.is_some() {
-            self.speed = other.speed;
-        }
-        if other.section.is_some() {
-            self.section = other.section.clone();
-        }
-        if other.text.is_some() {
-            self.text = other.text.clone();
-        }
+        let merged = self.merge(other);
+        *self = merged;
+    }
+}
+
+fn or_falsy_fraction(a: Option<Fraction>, b: Option<Fraction>) -> Option<Fraction> {
+    match a {
+        Some(v) if v != Fraction::zero() => Some(v),
+        _ => b,
+    }
+}
+
+fn or_falsy_i32(a: Option<i32>, b: Option<i32>) -> Option<i32> {
+    match a {
+        Some(v) if v != 0 => Some(v),
+        _ => b,
+    }
+}
+
+fn or_falsy_f64(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match a {
+        Some(v) if v != 0.0 => Some(v),
+        _ => b,
+    }
+}
+
+fn or_falsy_string(a: &Option<String>, b: &Option<String>) -> Option<String> {
+    match a {
+        Some(v) if !v.is_empty() => Some(v.clone()),
+        _ => b.clone(),
     }
 }

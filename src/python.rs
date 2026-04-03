@@ -1,22 +1,265 @@
+use pyo3::PyRef;
+use pyo3::PyRefMut;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use pyo3::types::PyModule;
 
 use crate::drawing::{Drawing, MusicMeta};
+use crate::fraction::Fraction;
 use crate::lyric::Lyric;
+use crate::meta::Meta;
+use crate::notes::event::Event;
 use crate::rebase::Rebase;
 use crate::score::Score;
 
+fn extract_fraction_like(value: &Bound<'_, pyo3::types::PyAny>) -> PyResult<Fraction> {
+    if let Ok(py_fraction) = value.extract::<PyRef<'_, PyFraction>>() {
+        return Ok(py_fraction.inner);
+    }
+    if let Ok(n) = value.extract::<i64>() {
+        return Ok(Fraction::from_integer(n));
+    }
+    if let Ok(f) = value.extract::<f64>() {
+        return Ok(Fraction::from_f64(f));
+    }
+    if let Ok(s) = value.extract::<String>()
+        && let Some(f) = Fraction::parse(&s)
+    {
+        return Ok(f);
+    }
+
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "expected a Fraction-compatible value",
+    ))
+}
+
+fn read_text_or_file(value: &Bound<'_, pyo3::types::PyAny>) -> PyResult<String> {
+    if let Ok(s) = value.extract::<String>() {
+        return Ok(s);
+    }
+    if value.hasattr("read")? {
+        return value.call_method0("read")?.extract::<String>();
+    }
+    if value.hasattr("readlines")? {
+        let lines: Vec<String> = value.call_method0("readlines")?.extract()?;
+        return Ok(lines.concat());
+    }
+
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "expected a string or a file-like object",
+    ))
+}
+
+fn parse_music_meta(meta_dict: Option<&Bound<'_, PyDict>>) -> PyResult<Option<MusicMeta>> {
+    let Some(meta_dict) = meta_dict else {
+        return Ok(None);
+    };
+
+    let fever_end_time: f64 = meta_dict
+        .get_item("fever_end_time")?
+        .map(|v| v.extract::<f64>())
+        .transpose()?
+        .unwrap_or(0.0);
+    let fever_score: f64 = meta_dict
+        .get_item("fever_score")?
+        .map(|v| v.extract::<f64>())
+        .transpose()?
+        .unwrap_or(0.0);
+    let skill_score_solo: Vec<f64> = meta_dict
+        .get_item("skill_score_solo")?
+        .map(|v| v.extract::<Vec<f64>>())
+        .transpose()?
+        .unwrap_or_default();
+    let skill_score_multi: Vec<f64> = meta_dict
+        .get_item("skill_score_multi")?
+        .map(|v| v.extract::<Vec<f64>>())
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok(Some(MusicMeta {
+        fever_end_time,
+        fever_score,
+        skill_score_solo,
+        skill_score_multi,
+    }))
+}
+
+#[pyclass(name = "Fraction", skip_from_py_object)]
+#[derive(Clone)]
+struct PyFraction {
+    inner: Fraction,
+}
+
+#[pymethods]
+impl PyFraction {
+    #[new]
+    #[pyo3(signature = (numerator, denominator=1))]
+    fn new(numerator: i64, denominator: i64) -> Self {
+        Self {
+            inner: Fraction::new(numerator, denominator),
+        }
+    }
+
+    #[getter]
+    fn numerator(&self) -> i64 {
+        *self.inner.numer()
+    }
+
+    #[getter]
+    fn denominator(&self) -> i64 {
+        *self.inner.denom()
+    }
+
+    fn limit_denominator(&self, max_denominator: Option<i64>) -> PyFraction {
+        PyFraction {
+            inner: self
+                .inner
+                .limit_denominator(max_denominator.unwrap_or(1_000_000)),
+        }
+    }
+
+    fn __float__(&self) -> f64 {
+        self.inner.to_f64()
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        self.inner.to_string()
+    }
+}
+
+#[pyclass(name = "Meta", skip_from_py_object)]
+#[derive(Clone)]
+struct PyMeta {
+    inner: Meta,
+}
+
+#[pymethods]
+impl PyMeta {
+    #[getter]
+    fn title(&self) -> Option<String> {
+        self.inner.title.clone()
+    }
+
+    #[getter]
+    fn subtitle(&self) -> Option<String> {
+        self.inner.subtitle.clone()
+    }
+
+    #[getter]
+    fn artist(&self) -> Option<String> {
+        self.inner.artist.clone()
+    }
+
+    #[getter]
+    fn genre(&self) -> Option<String> {
+        self.inner.genre.clone()
+    }
+
+    #[getter]
+    fn designer(&self) -> Option<String> {
+        self.inner.designer.clone()
+    }
+
+    #[getter]
+    fn difficulty(&self) -> Option<String> {
+        self.inner.difficulty.clone()
+    }
+
+    #[getter]
+    fn playlevel(&self) -> Option<String> {
+        self.inner.playlevel.clone()
+    }
+
+    #[getter]
+    fn songid(&self) -> Option<String> {
+        self.inner.songid.clone()
+    }
+
+    #[getter]
+    fn wave(&self) -> Option<String> {
+        self.inner.wave.clone()
+    }
+
+    #[getter]
+    fn waveoffset(&self) -> Option<String> {
+        self.inner.waveoffset.clone()
+    }
+
+    #[getter]
+    fn jacket(&self) -> Option<String> {
+        self.inner.jacket.clone()
+    }
+
+    #[getter]
+    fn background(&self) -> Option<String> {
+        self.inner.background.clone()
+    }
+
+    #[getter]
+    fn movie(&self) -> Option<String> {
+        self.inner.movie.clone()
+    }
+
+    #[getter]
+    fn movieoffset(&self) -> Option<f64> {
+        self.inner.movieoffset
+    }
+
+    #[getter]
+    fn basebpm(&self) -> Option<f64> {
+        self.inner.basebpm
+    }
+}
+
 /// Lightweight event view exposed to Python
-#[pyclass(name = "Event")]
+#[pyclass(name = "Event", skip_from_py_object)]
+#[derive(Clone)]
 struct PyEvent {
-    #[pyo3(get)]
-    bar: f64,
-    #[pyo3(get)]
-    bpm: Option<f64>,
-    #[pyo3(get)]
-    speed: Option<f64>,
-    #[pyo3(get)]
-    text: Option<String>,
+    inner: Event,
+}
+
+#[pymethods]
+impl PyEvent {
+    #[getter]
+    fn bar(&self) -> PyFraction {
+        PyFraction {
+            inner: self.inner.bar,
+        }
+    }
+
+    #[getter]
+    fn bpm(&self) -> Option<PyFraction> {
+        self.inner.bpm.map(|inner| PyFraction { inner })
+    }
+
+    #[getter]
+    fn bar_length(&self) -> Option<PyFraction> {
+        self.inner.bar_length.map(|inner| PyFraction { inner })
+    }
+
+    #[getter]
+    fn sentence_length(&self) -> Option<i32> {
+        self.inner.sentence_length
+    }
+
+    #[getter]
+    fn speed(&self) -> Option<f64> {
+        self.inner.speed
+    }
+
+    #[getter]
+    fn section(&self) -> Option<String> {
+        self.inner.section.clone()
+    }
+
+    #[getter]
+    fn text(&self) -> Option<String> {
+        self.inner.text.clone()
+    }
 }
 
 /// Python wrapper for Score
@@ -41,6 +284,13 @@ impl PyScore {
     fn from_str(content: &str) -> PyScore {
         PyScore {
             inner: content.parse().unwrap(),
+        }
+    }
+
+    #[getter]
+    fn meta(&self) -> PyMeta {
+        PyMeta {
+            inner: self.inner.meta.clone(),
         }
     }
 
@@ -114,13 +364,41 @@ impl PyScore {
         self.inner
             .events
             .iter()
-            .map(|e| PyEvent {
-                bar: e.bar.to_f64(),
-                bpm: e.bpm.as_ref().map(|b| b.to_f64()),
-                speed: e.speed,
-                text: e.text.clone(),
-            })
+            .cloned()
+            .map(|inner| PyEvent { inner })
             .collect()
+    }
+
+    fn get_time(&mut self, bar: &Bound<'_, pyo3::types::PyAny>) -> PyResult<PyFraction> {
+        let bar = extract_fraction_like(bar)?;
+        Ok(PyFraction {
+            inner: self.inner.get_time(bar),
+        })
+    }
+
+    fn get_event(&mut self, bar: &Bound<'_, pyo3::types::PyAny>) -> PyResult<PyEvent> {
+        let bar = extract_fraction_like(bar)?;
+        Ok(PyEvent {
+            inner: self.inner.get_event(bar),
+        })
+    }
+
+    fn get_time_delta(
+        &mut self,
+        bar_from: &Bound<'_, pyo3::types::PyAny>,
+        bar_to: &Bound<'_, pyo3::types::PyAny>,
+    ) -> PyResult<PyFraction> {
+        let bar_from = extract_fraction_like(bar_from)?;
+        let bar_to = extract_fraction_like(bar_to)?;
+        Ok(PyFraction {
+            inner: self.inner.get_time_delta(bar_from, bar_to),
+        })
+    }
+
+    fn get_bar_by_time(&mut self, time: f64) -> PyFraction {
+        PyFraction {
+            inner: self.inner.get_bar_by_time(time),
+        }
     }
 }
 
@@ -132,12 +410,13 @@ struct PyLyric {
 
 #[pymethods]
 impl PyLyric {
-    /// Load lyrics from a string
+    /// Load lyrics from a string or a file-like object
     #[staticmethod]
-    fn load(content: &str) -> PyLyric {
-        PyLyric {
-            inner: Lyric::load(content),
-        }
+    fn load(content: &Bound<'_, pyo3::types::PyAny>) -> PyResult<PyLyric> {
+        let content = read_text_or_file(content)?;
+        Ok(PyLyric {
+            inner: Lyric::load(&content),
+        })
     }
 
     /// Get the number of words
@@ -154,6 +433,15 @@ struct PyRebase {
 
 #[pymethods]
 impl PyRebase {
+    #[staticmethod]
+    fn load(py: pyo3::Python<'_>, value: &Bound<'_, pyo3::types::PyAny>) -> PyResult<PyRebase> {
+        if value.is_instance_of::<PyDict>() {
+            return Self::from_dict(py, value);
+        }
+        let content = read_text_or_file(value)?;
+        Self::from_json(&content)
+    }
+
     /// Load from JSON string
     #[staticmethod]
     fn from_json(json_str: &str) -> PyResult<PyRebase> {
@@ -173,10 +461,26 @@ impl PyRebase {
         Ok(PyRebase { inner: rebase })
     }
 
+    #[staticmethod]
+    fn load_from_dict(
+        py: pyo3::Python<'_>,
+        dict: &Bound<'_, pyo3::types::PyAny>,
+    ) -> PyResult<PyRebase> {
+        Self::from_dict(py, dict)
+    }
+
     /// Apply rebase to a score
     fn apply(&self, score: &mut PyScore) -> PyScore {
         let new_score = self.inner.apply(&mut score.inner);
         PyScore { inner: new_score }
+    }
+
+    fn rebase(&self, score: &mut PyScore) -> PyScore {
+        self.apply(score)
+    }
+
+    fn __call__(&self, score: &mut PyScore) -> PyScore {
+        self.apply(score)
     }
 }
 
@@ -184,50 +488,25 @@ impl PyRebase {
 #[pyclass(name = "Drawing")]
 struct PyDrawing {
     inner: Drawing,
+    stored_score: Option<Score>,
+    stored_lyric: Option<Lyric>,
 }
 
 #[pymethods]
 impl PyDrawing {
     #[new]
-    #[pyo3(signature = (note_host=None, style_sheet=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None))]
+    #[pyo3(signature = (score=None, lyric=None, style_sheet=None, note_host=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None))]
     fn new(
-        note_host: Option<String>,
+        score: Option<PyRef<'_, PyScore>>,
+        lyric: Option<PyRef<'_, PyLyric>>,
         style_sheet: Option<String>,
+        note_host: Option<String>,
         skill: bool,
         music_meta: Option<&Bound<'_, PyDict>>,
         target_segment_seconds: Option<f64>,
         generator: Option<String>,
     ) -> PyResult<PyDrawing> {
-        let mm = if let Some(meta_dict) = music_meta {
-            let fever_end_time: f64 = meta_dict
-                .get_item("fever_end_time")?
-                .map(|v| v.extract::<f64>())
-                .transpose()?
-                .unwrap_or(0.0);
-            let fever_score: f64 = meta_dict
-                .get_item("fever_score")?
-                .map(|v| v.extract::<f64>())
-                .transpose()?
-                .unwrap_or(0.0);
-            let skill_score_solo: Vec<f64> = meta_dict
-                .get_item("skill_score_solo")?
-                .map(|v| v.extract::<Vec<f64>>())
-                .transpose()?
-                .unwrap_or_default();
-            let skill_score_multi: Vec<f64> = meta_dict
-                .get_item("skill_score_multi")?
-                .map(|v| v.extract::<Vec<f64>>())
-                .transpose()?
-                .unwrap_or_default();
-            Some(MusicMeta {
-                fever_end_time,
-                fever_score,
-                skill_score_solo,
-                skill_score_multi,
-            })
-        } else {
-            None
-        };
+        let mm = parse_music_meta(music_meta)?;
 
         Ok(PyDrawing {
             inner: Drawing::new(
@@ -238,13 +517,32 @@ impl PyDrawing {
                 target_segment_seconds,
                 generator,
             ),
+            stored_score: score.map(|score| score.inner.clone()),
+            stored_lyric: lyric.map(|lyric| lyric.inner.clone()),
         })
     }
 
     /// Generate SVG string from a score
-    #[pyo3(signature = (score, lyric=None))]
-    fn svg(&mut self, score: &mut PyScore, lyric: Option<&PyLyric>) -> String {
-        self.inner.svg(&mut score.inner, lyric.map(|l| &l.inner))
+    #[pyo3(signature = (score=None, lyric=None))]
+    fn svg(
+        &mut self,
+        score: Option<PyRefMut<'_, PyScore>>,
+        lyric: Option<PyRef<'_, PyLyric>>,
+    ) -> PyResult<String> {
+        let lyric_override = lyric.map(|lyric| lyric.inner.clone());
+
+        if let Some(mut score) = score {
+            let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
+            return Ok(self.inner.svg(&mut score.inner, lyric_ref));
+        }
+
+        let mut stored_score = self.stored_score.clone().ok_or_else(|| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "score is required when Drawing was created without one",
+            )
+        })?;
+        let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
+        Ok(self.inner.svg(&mut stored_score, lyric_ref))
     }
 
     #[getter]
@@ -300,33 +598,7 @@ fn sus_to_svg(
     }
 
     let lyric = lyric_content.map(Lyric::load);
-
-    let mm = if let Some(meta_dict) = music_meta {
-        Some(MusicMeta {
-            fever_end_time: meta_dict
-                .get_item("fever_end_time")?
-                .map(|v| v.extract::<f64>())
-                .transpose()?
-                .unwrap_or(0.0),
-            fever_score: meta_dict
-                .get_item("fever_score")?
-                .map(|v| v.extract::<f64>())
-                .transpose()?
-                .unwrap_or(0.0),
-            skill_score_solo: meta_dict
-                .get_item("skill_score_solo")?
-                .map(|v| v.extract::<Vec<f64>>())
-                .transpose()?
-                .unwrap_or_default(),
-            skill_score_multi: meta_dict
-                .get_item("skill_score_multi")?
-                .map(|v| v.extract::<Vec<f64>>())
-                .transpose()?
-                .unwrap_or_default(),
-        })
-    } else {
-        None
-    };
+    let mm = parse_music_meta(music_meta)?;
 
     let mut drawing = Drawing::new(
         note_host,
@@ -341,6 +613,8 @@ fn sus_to_svg(
 
 /// Register all Python types and functions
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyFraction>()?;
+    m.add_class::<PyMeta>()?;
     m.add_class::<PyEvent>()?;
     m.add_class::<PyScore>()?;
     m.add_class::<PyLyric>()?;

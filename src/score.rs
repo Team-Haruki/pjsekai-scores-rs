@@ -12,6 +12,7 @@ use crate::notes::{NO_NOTE, NoteData, NoteIdx};
 
 /// The main score container. Holds all parsed notes in an arena
 /// and events in a sorted list.
+#[derive(Clone)]
 pub struct Score {
     pub meta: Meta,
     /// Arena of all notes; indices are stable after init
@@ -323,7 +324,7 @@ impl Score {
     }
 
     /// Get time and event at a given bar position (binary search)
-    pub fn get_timed_event(&mut self, bar: Fraction) -> (f64, Event) {
+    pub fn get_timed_event(&mut self, bar: Fraction) -> (Fraction, Event) {
         let timed = self.timed_events().to_vec();
         // Binary search: find last event with bar <= target
         let idx = match timed.binary_search_by(|probe| {
@@ -347,11 +348,11 @@ impl Score {
         let bpm = e.bpm.unwrap_or(Fraction::from_integer(120));
         let bar_length = e.bar_length.unwrap_or(Fraction::from_integer(4));
         let delta = bar - e.bar;
-        let time = (*t + bar_length * Fraction::from_integer(60) / bpm * delta).to_f64();
+        let time = *t + bar_length * Fraction::from_integer(60) / bpm * delta;
         (time, e.clone())
     }
 
-    pub fn get_time(&mut self, bar: Fraction) -> f64 {
+    pub fn get_time(&mut self, bar: Fraction) -> Fraction {
         self.get_timed_event(bar).0
     }
 
@@ -359,8 +360,16 @@ impl Score {
         self.get_timed_event(bar).1
     }
 
-    pub fn get_time_delta(&mut self, bar_from: Fraction, bar_to: Fraction) -> f64 {
+    pub fn get_time_delta(&mut self, bar_from: Fraction, bar_to: Fraction) -> Fraction {
         self.get_time(bar_to) - self.get_time(bar_from)
+    }
+
+    pub fn get_time_f64(&mut self, bar: Fraction) -> f64 {
+        self.get_time(bar).to_f64()
+    }
+
+    pub fn get_time_delta_f64(&mut self, bar_from: Fraction, bar_to: Fraction) -> f64 {
+        self.get_time_delta(bar_from, bar_to).to_f64()
     }
 
     /// Inverse: get bar position from elapsed time
