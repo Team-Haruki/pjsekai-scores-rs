@@ -311,7 +311,8 @@ impl Score {
             let bpm = e.bpm.unwrap_or(Fraction::from_integer(120));
             let bar_length = e.bar_length.unwrap_or(Fraction::from_integer(4));
             let delta_bar = event.bar - e.bar;
-            t = t + delta_bar * bar_length * Fraction::from_integer(60) / bpm;
+            t = (t + delta_bar * bar_length * Fraction::from_integer(60) / bpm)
+                .limit_denominator(1_000_000_000);
             e = e.merge(event);
             timed.push((t, e.clone()));
         }
@@ -348,7 +349,8 @@ impl Score {
         let bpm = e.bpm.unwrap_or(Fraction::from_integer(120));
         let bar_length = e.bar_length.unwrap_or(Fraction::from_integer(4));
         let delta = bar - e.bar;
-        let time = *t + bar_length * Fraction::from_integer(60) / bpm * delta;
+        let time = (*t + bar_length * Fraction::from_integer(60) / bpm * delta)
+            .limit_denominator(1_000_000_000);
         (time, e.clone())
     }
 

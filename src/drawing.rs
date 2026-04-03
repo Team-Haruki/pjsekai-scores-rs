@@ -1528,7 +1528,7 @@ impl Drawing {
 
 /// Binary search to find x-coordinate on a cubic Bézier curve at a given y
 fn binary_solution_for_x(y: f64, curve: &[(f64, f64); 4]) -> f64 {
-    binary_solution_for_x_inner(y, curve, 0.0, 1.0, 0.1)
+    binary_solution_for_x_inner(y, curve, 0.0, 1.0, 0.1, 100)
 }
 
 fn binary_solution_for_x_inner(
@@ -1537,6 +1537,7 @@ fn binary_solution_for_x_inner(
     start: f64,
     end: f64,
     epsilon: f64,
+    max_depth: u32,
 ) -> f64 {
     let t = (start + end) / 2.0;
     let t1 = 1.0 - t;
@@ -1551,12 +1552,12 @@ fn binary_solution_for_x_inner(
         + curve[2].1 * 3.0 * t1 * t * t
         + curve[3].1 * t * t * t;
 
-    if (py - y).abs() < epsilon {
+    if (py - y).abs() < epsilon || max_depth == 0 {
         px
     } else if py > y {
-        binary_solution_for_x_inner(y, curve, t, end, epsilon)
+        binary_solution_for_x_inner(y, curve, t, end, epsilon, max_depth - 1)
     } else {
-        binary_solution_for_x_inner(y, curve, start, t, epsilon)
+        binary_solution_for_x_inner(y, curve, start, t, epsilon, max_depth - 1)
     }
 }
 
