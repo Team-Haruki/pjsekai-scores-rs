@@ -127,3 +127,37 @@ The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build
 - **Do not use `r#"..."#`** for strings that embed `href="#` — use `r##"..."##`.
 - **Do not move `let cfg = &self.config`** before the `build_skill_covers()` call in `drawing.rs`.
 - **Do not rename `notes.rs` back to `notes/mod.rs`** — the module root lives at `src/notes.rs`; submodules stay in `src/notes/`.
+
+---
+
+## Git commit format
+
+All commits **must** follow:
+
+```
+[Type] Short description starting with capital letter
+```
+
+| Type      | Usage                                                 |
+|-----------|-------------------------------------------------------|
+| `[Feat]`  | New feature or capability                             |
+| `[Fix]`   | Bug fix                                               |
+| `[Chore]` | Maintenance, refactoring, dependency or build changes |
+| `[Docs]`  | Documentation-only changes                            |
+
+Rules:
+
+- Description starts with a **capital letter**.
+- Imperative mood (`Add ...`, not `Added ...`).
+- No trailing period.
+- Keep subject ≤ ~70 chars.
+- **Agent commits must include a `Co-Authored-By` trailer** identifying the agent.
+
+Examples:
+
+```
+[Feat] Add toolbox live snapshot provider
+[Fix] Move user_snapshot config under pjsk_render
+[Chore] Rename config file to haruki-cloud.yaml
+[Docs] Update known-bugs.md with snapshot fix
+```

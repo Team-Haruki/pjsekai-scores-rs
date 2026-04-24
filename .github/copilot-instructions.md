@@ -97,3 +97,37 @@ uv pip install target/wheels/*.whl      # Install local wheel into venv
 Benchmarking (measured 2026-03-24):  
 **Python original: 1.879s → Rust: 0.020s → 95.4× speedup**  
 Environment: Debian 12 · Intel Xeon Platinum 8272CL × 8 cores @ 2.594 GHz · Python 3.13 · AMD64 · both pipelines running concurrently
+
+---
+
+## Git commit format
+
+All commits **must** follow:
+
+```
+[Type] Short description starting with capital letter
+```
+
+| Type      | Usage                                                 |
+|-----------|-------------------------------------------------------|
+| `[Feat]`  | New feature or capability                             |
+| `[Fix]`   | Bug fix                                               |
+| `[Chore]` | Maintenance, refactoring, dependency or build changes |
+| `[Docs]`  | Documentation-only changes                            |
+
+Rules:
+
+- Description starts with a **capital letter**.
+- Imperative mood (`Add ...`, not `Added ...`).
+- No trailing period.
+- Keep subject ≤ ~70 chars.
+- **Agent commits must include a `Co-Authored-By` trailer** identifying the agent.
+
+Examples:
+
+```
+[Feat] Add toolbox live snapshot provider
+[Fix] Move user_snapshot config under pjsk_render
+[Chore] Rename config file to haruki-cloud.yaml
+[Docs] Update known-bugs.md with snapshot fix
+```
