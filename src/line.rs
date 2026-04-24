@@ -16,7 +16,8 @@ static RE_EVENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{3})02$").u
 static RE_BPM_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^BPM(..)$").unwrap());
 static RE_BPM_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{3})08$").unwrap());
 static RE_TIL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^TIL(..)$").unwrap());
-static RE_SPEED_ITEM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\d+)'(\d+):(\S+)").unwrap());
+static RE_SPEED_ITEM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\d+)'(\d+):([^\s,]+)").unwrap());
 static RE_TAP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{3})1(.)$").unwrap());
 static RE_SLIDE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{3})3(.)(.)$").unwrap());
 static RE_DIRECTIONAL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d{3})5(.)$").unwrap());

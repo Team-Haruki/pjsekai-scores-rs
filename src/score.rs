@@ -271,7 +271,9 @@ impl Score {
         self.active_notes = (0..n).filter(|&i| !note_deleted[i]).collect();
     }
 
-    /// Merge consecutive events at the same bar position
+    /// Dedup fully-identical consecutive events (matches Python's `_init_events`,
+    /// which uses dataclass-generated `__eq__` comparing all fields).
+    /// Events at the same bar with DIFFERENT fields are kept as separate entries.
     pub fn init_events(&mut self) {
         self.events.sort_by(|a, b| {
             a.bar
@@ -282,9 +284,8 @@ impl Score {
         let mut merged: Vec<Event> = Vec::new();
         for event in &self.events {
             if let Some(last) = merged.last_mut()
-                && last.bar == event.bar
+                && events_equal(last, event)
             {
-                last.merge_from(event);
                 continue;
             }
             merged.push(event.clone());
@@ -324,26 +325,13 @@ impl Score {
         self.timed_events_cache.insert(timed)
     }
 
-    /// Get time and event at a given bar position (binary search)
+    /// Get time and event at a given bar position (binary search).
+    /// Matches Python's `bisect.bisect(...) - 1`: picks the LAST entry whose
+    /// bar <= target, so duplicate-bar events resolve to the most-merged state.
     pub fn get_timed_event(&mut self, bar: Fraction) -> (Fraction, Event) {
         let timed = self.timed_events().to_vec();
-        // Binary search: find last event with bar <= target
-        let idx = match timed.binary_search_by(|probe| {
-            probe
-                .1
-                .bar
-                .partial_cmp(&bar)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }) {
-            Ok(i) => i,
-            Err(i) => {
-                if i > 0 {
-                    i - 1
-                } else {
-                    0
-                }
-            }
-        };
+        let after = timed.partition_point(|probe| probe.1.bar <= bar);
+        let idx = if after == 0 { 0 } else { after - 1 };
 
         let (ref t, ref e) = timed[idx];
         let bpm = e.bpm.unwrap_or(Fraction::from_integer(120));
@@ -371,7 +359,12 @@ impl Score {
     }
 
     pub fn get_time_delta_f64(&mut self, bar_from: Fraction, bar_to: Fraction) -> f64 {
-        self.get_time_delta(bar_from, bar_to).to_f64()
+        // Limit each operand's denominator before subtraction to keep
+        // Ratio<i64> arithmetic within range (raw subtraction of two timed
+        // fractions with 10^9 denominators overflows i64 in num * den).
+        let t_to = self.get_time(bar_to).limit_denominator(1_000_000);
+        let t_from = self.get_time(bar_from).limit_denominator(1_000_000);
+        (t_to - t_from).to_f64()
     }
 
     /// Inverse: get bar position from elapsed time
@@ -423,4 +416,14 @@ impl Default for Score {
     fn default() -> Self {
         Score::new()
     }
+}
+
+fn events_equal(a: &Event, b: &Event) -> bool {
+    a.bar == b.bar
+        && a.bpm == b.bpm
+        && a.bar_length == b.bar_length
+        && a.sentence_length == b.sentence_length
+        && a.speed == b.speed
+        && a.section == b.section
+        && a.text == b.text
 }
