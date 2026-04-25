@@ -49,12 +49,14 @@ jobs:
   # ──────────────────────────────────────────────
   # Build free-threaded wheels for Linux (x86_64, aarch64)
   # manylinux_2_28 containers include 3.13t / 3.14t
+  # aarch64 already gets free-threaded via manylinux auto;
+  # only x86_64 needs the manylinux_2_28 container.
   # ──────────────────────────────────────────────
   linux-freethreaded:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64, aarch64]
+        target: [x86_64]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
