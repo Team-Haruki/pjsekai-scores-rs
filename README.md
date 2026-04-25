@@ -17,13 +17,15 @@ Project SEKAI score (`.sus`) parser and SVG chart renderer, rewritten in Rust.
 
 ## Performance
 
-Measured in production against the original Python implementation, both running concurrently on the same request:
+Benchmarked against the original Python implementation (`pjsekai/scores`) on the same input (`.sus` → SVG, 30 iterations, median):
 
-| Metric | Python | Rust | Speedup |
+| Phase | Python | Rust | Speedup |
 |---|---|---|---|
-| Full pipeline (parse → rebase → SVG) | 1.879s | 0.020s | **95.4×** |
+| Parse (`.sus` → `Score`) | 14.454ms | 3.265ms | **4.4×** |
+| Render (`Score` → SVG string) | 382.670ms | 20.163ms | **19.0×** |
+| **Total** | **404.806ms** | **23.229ms** | **17.4×** |
 
-> **Environment:** Debian 12 · Intel Xeon Platinum 8272CL × 8 cores @ 2.594 GHz · Python 3.13 · AMD64
+> **Environment:** Mac mini M4 · macOS 26.4.1 · Python 3.13 · ARM64
 
 The dominant win is SVG generation: Rust replaces thousands of Python `svgwrite` object allocations and DOM traversals with direct `String` building and pre-computed layout arithmetic.
 

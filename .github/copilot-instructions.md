@@ -94,9 +94,9 @@ pip install pjsekai-scores-rs           # Install from PyPI
 uv pip install target/wheels/*.whl      # Install local wheel into venv
 ```
 
-Benchmarking (measured 2026-03-24):  
-**Python original: 1.879s → Rust: 0.020s → 95.4× speedup**  
-Environment: Debian 12 · Intel Xeon Platinum 8272CL × 8 cores @ 2.594 GHz · Python 3.13 · AMD64 · both pipelines running concurrently
+Benchmarking (measured 2026-04-25):  
+**Parse: 14.5ms → 3.3ms (4.4×) · Render: 382.7ms → 20.2ms (19.0×) · Total: 404.8ms → 23.2ms (17.4×)**  
+Environment: Mac mini M4 · macOS 26.4.1 · Python 3.13 · ARM64
 
 ---
 
