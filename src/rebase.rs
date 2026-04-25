@@ -96,11 +96,11 @@ impl Rebase {
                 .or_insert_with(|| source.get_time(bar));
             // Also handle linked notes
             match note {
-                NoteData::Directional(_, dir) => {
-                    if dir.tap_idx != NO_NOTE {
-                        let tb = notes_snapshot[dir.tap_idx].bar();
-                        bar_to_time.entry(tb).or_insert_with(|| source.get_time(tb));
-                    }
+                NoteData::Directional(_, dir)
+                    if dir.tap_idx != NO_NOTE =>
+                {
+                    let tb = notes_snapshot[dir.tap_idx].bar();
+                    bar_to_time.entry(tb).or_insert_with(|| source.get_time(tb));
                 }
                 NoteData::Slide(_, slide) => {
                     if slide.tap_idx != NO_NOTE {

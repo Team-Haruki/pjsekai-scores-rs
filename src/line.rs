@@ -253,7 +253,7 @@ impl Line {
                     });
                 }
             }
-            items.sort_by(|a, b| (a.bar, a.tick).cmp(&(b.bar, b.tick)));
+            items.sort_by_key(|a| (a.bar, a.tick));
             return vec![ParsedItem::SpeedDefinition(SpeedDefinition { id, items })];
         }
 
