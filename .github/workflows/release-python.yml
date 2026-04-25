@@ -34,11 +34,9 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --out dist --find-interpreter
           sccache: "true"
           manylinux: auto
-          python-source: github
-          python-versions: "3.9 3.10 3.11 3.12 3.13 3.14 3.14t"
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
