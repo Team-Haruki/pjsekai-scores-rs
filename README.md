@@ -279,6 +279,18 @@ pjsekai-scores-rs/
 - CSS is embedded at compile time via `include_str!` — no runtime file lookup required.
 - The `generate-import-lib` PyO3 feature is enabled so the Windows wheel can be cross-compiled without a local Windows Python installation.
 
+## SVG rendering differences from Python original
+
+The SVG output is functionally equivalent to the Python reference implementation, with the following intentional differences:
+
+| Aspect | Python original | This implementation |
+|---|---|---|
+| `<use>` attribute | `xlink:href` (SVG 1.1) | `href` (SVG 2.0) |
+| `<defs>` blocks | One per sub-SVG | Single merged block |
+| Speed-change line layer | Below notes | **Above notes** (drawn last, for readability) |
+
+The speed-change lines (purple horizontal lines marking BPM-speed events) are rendered on top of notes so they are not obscured when a note lands on the same row.
+
 ## License
 
 MIT

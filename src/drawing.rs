@@ -519,6 +519,7 @@ impl Drawing {
         let mut note_images = String::new();
         let mut flick_images_rev: Vec<String> = Vec::new();
         let mut tick_texts = String::new();
+        let mut speed_lines = String::new();
 
         // Process notes
         let active = score.active_notes.clone();
@@ -887,7 +888,7 @@ impl Drawing {
                 let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64;
 
                 write!(
-                    svg,
+                    speed_lines,
                     r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="speed-line"/>"#,
                     round(x1),
                     round(y),
@@ -896,7 +897,7 @@ impl Drawing {
                 )
                 .unwrap();
                 write!(
-                    svg,
+                    speed_lines,
                     r#"<text x="{}" y="{}" class="speed-text">{}x</text>"#,
                     round(x2 - 2.0),
                     round(y - 2.0),
@@ -1018,7 +1019,8 @@ impl Drawing {
             }
         }
 
-        // Layer order: slides → notes → amongs → flicks (reversed) → ticks
+        // Layer order: slides → notes → amongs → flicks (reversed) → ticks → speed lines
+        // Speed lines are drawn last so they appear on top of notes for readability.
         svg.push_str(&slide_paths);
         svg.push_str(&note_images);
         svg.push_str(&among_images);
@@ -1026,6 +1028,7 @@ impl Drawing {
             svg.push_str(flick);
         }
         svg.push_str(&tick_texts);
+        svg.push_str(&speed_lines);
 
         (svg, width, height + cfg.time_padding as f64 * 2.0)
     }
