@@ -22,7 +22,8 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Set version from tag
         if: github.event_name == 'release'
         run: |
@@ -51,14 +52,16 @@ jobs:
       matrix:
         target: [x86_64, aarch64]
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Set version from tag
         if: github.event_name == 'release'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           sed -i '' "1,/^version = .*/{s/^version = .*/version = \"${VERSION}\"/;}" Cargo.toml
           sed -i '' "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: |
             3.9
@@ -87,7 +90,8 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Set version from tag
         if: github.event_name == 'release'
         shell: bash
@@ -95,7 +99,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           sed -i "0,/^version = .*/s//version = \"${VERSION}\"/" Cargo.toml
           sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: |
             3.9
@@ -124,7 +129,8 @@ jobs:
   sdist:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v6
       - name: Set version from tag
         if: github.event_name == 'release'
         run: |
@@ -156,7 +162,8 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - name: Download wheels
+        uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           merge-multiple: true
