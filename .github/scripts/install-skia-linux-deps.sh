@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+target="${1:-x86_64}"
+
 install_rpm_deps() {
   local manager="$1"
 
@@ -11,6 +13,23 @@ install_rpm_deps() {
   fi
 }
 
+install_apt_deps() {
+  case "$target" in
+    x86_64)
+      apt-get update
+      apt-get install -y libfontconfig1-dev libfreetype6-dev pkg-config
+      ;;
+    aarch64)
+      apt-get update
+      apt-get install -y libfontconfig1-dev-arm64-cross libfreetype6-dev-arm64-cross pkg-config
+      ;;
+    *)
+      echo "Unsupported Skia Linux target: $target" >&2
+      exit 1
+      ;;
+  esac
+}
+
 if command -v yum >/dev/null 2>&1; then
   install_rpm_deps yum
 elif command -v dnf >/dev/null 2>&1; then
@@ -18,8 +37,7 @@ elif command -v dnf >/dev/null 2>&1; then
 elif command -v microdnf >/dev/null 2>&1; then
   install_rpm_deps microdnf
 elif command -v apt-get >/dev/null 2>&1; then
-  apt-get update
-  apt-get install -y libfontconfig1-dev libfreetype6-dev pkg-config
+  install_apt_deps
 else
   echo "No supported package manager found for Skia Linux dependencies" >&2
   exit 1
