@@ -1,6 +1,6 @@
 # pjsekai-scores-rs
 
-Project SEKAI score (`.sus`) parser and SVG chart renderer, rewritten in Rust.
+Project SEKAI score (`.sus`) parser, SVG chart renderer, and direct Skia image renderer, rewritten in Rust.
 
 - Original Python project: [pjsekai/scores](https://gitlab.com/pjsekai/scores)
 - Skill information previewer based on [xfl03's fork](https://github.com/xfl03/SekaiMusicChart)
@@ -9,6 +9,7 @@ Project SEKAI score (`.sus`) parser and SVG chart renderer, rewritten in Rust.
 
 - Parses `.sus` format score files (Score format specification v2.7 rev2)
 - Generates SVG chart images with full note rendering (Tap / Directional / Slide)
+- Generates PNG/JPEG chart images directly with Skia, without SVG rasterization
 - BPM rebase support (custom timing via JSON)
 - Lyric overlay support
 - Skill/Fever cover overlay support
@@ -43,11 +44,25 @@ Options:
       --rebase <REBASE>          Customized BPM, beats and sections (JSON)
       --lyric <LYRIC>            Lyrics file
       --css <CSS>                Custom CSS stylesheet
-      --note-host <NOTE_HOST>    Base URL for note asset files
+      --note-host <NOTE_HOST>    Base URL for SVG note assets, or local directory for Skia image note assets
                                  [default: https://asset3.pjsekai.moe/live/note/custom01]
+      --note-asset-extension <EXTENSION>
+                                 File extension for note asset files [default: png]
+      --title <TITLE>            Music title shown in the chart footer
+      --artist <ARTIST>          Music artist shown in the chart footer
+      --difficulty <DIFFICULTY>  Difficulty shown in the chart footer
+      --play-level <PLAY_LEVEL>  Play level shown in the chart footer
+      --music-id <MUSIC_ID>      Music ID shown in the chart footer
+      --jacket <JACKET>          Jacket image URI/path shown in the chart footer
+      --skill                    Render skill and fever overlay coverage
+      --music-meta <MUSIC_META>  Music metadata JSON or JSON file path for skill score overlay
+      --target-segment-seconds <SECONDS>
+                                 Approximate seconds per chart column
+      --jpeg-quality <JPEG_QUALITY>
+                                 JPEG quality for .jpg/.jpeg output (0-100) [default: 90]
       --generator <GENERATOR>    Generator name shown in the SVG subtitle
                                  [default: HarukiBot NEO]
-  -o, --output <OUTPUT>          Output SVG file path
+  -o, --output <OUTPUT>          Output file path (.svg, .png, .jpg, or .jpeg)
   -h, --help                     Print help
 ```
 
@@ -60,8 +75,26 @@ pjsekai-scores-rs master.sus -o master.svg
 # With custom BPM rebase and lyrics
 pjsekai-scores-rs master.sus --rebase rebase.json --lyric lyrics.txt -o master.svg
 
-# With custom CSS theme and local note assets
+# SVG with custom CSS theme and local note assets
 pjsekai-scores-rs master.sus --css dark.css --note-host /path/to/notes -o master.svg
+
+# PNG via direct Skia rendering. Build with --features skia-image.
+pjsekai-scores-rs master.sus --css dark.css --note-host /path/to/notes -o master.png
+
+# JPEG via direct Skia rendering. JPEG quality defaults to 90.
+pjsekai-scores-rs master.sus --css dark.css --note-host /path/to/notes --jpeg-quality 92 -o master.jpg
+
+# With Haruki/Saika chart request metadata
+pjsekai-scores-rs master.sus \
+  --note-host /path/to/chart_asset/notes \
+  --jacket /path/to/jacket.png \
+  --title "Tell Your World" \
+  --artist kz \
+  --difficulty master \
+  --play-level 26 \
+  --music-id 1 \
+  --target-segment-seconds 8 \
+  -o master.svg
 ```
 
 ---
@@ -114,8 +147,14 @@ let svg = drawing.svg(&mut rebased, None);
 ### Building (Rust only)
 
 ```bash
-cargo build --release
+# Standard CLI: SVG output only
+cargo build --release --bin pjsekai-scores-rs
+
+# Skia CLI: SVG output + direct PNG/JPEG output
+cargo build --release --features skia-image --bin pjsekai-scores-rs
 ```
+
+GitHub CLI releases build both variants for each target. Skia-enabled assets are named with a `-skia-image` suffix.
 
 ---
 
@@ -136,7 +175,11 @@ uv add pjsekai-scores-rs
 Or build and install from source (requires [maturin](https://github.com/PyO3/maturin)):
 
 ```bash
+# Default wheel: Python bindings without Skia image output support.
 maturin develop --release
+
+# Optional Skia image wheel for local/private use.
+maturin develop --release --features python,skia-image
 ```
 
 ### Python API
@@ -196,10 +239,18 @@ drawing.lane_width = 16     # lane width in pixels (default 16)
 
 svg_string = drawing.svg(score)              # returns str
 svg_string = drawing.svg(score, lyric=lyric) # with lyrics
+png_bytes = drawing.png(score)               # requires a skia-image wheel
+jpg_bytes = drawing.jpg(score)               # requires a skia-image wheel, quality defaults to 90
 
 # Write to file
 with open("master.svg", "w") as f:
     f.write(svg_string)
+
+with open("master.png", "wb") as f:
+    f.write(png_bytes)
+
+with open("master.jpg", "wb") as f:
+    f.write(jpg_bytes)
 
 # ── Convenience function ──────────────────────────────────────────────────────
 svg = pjsekai_scores_rs.sus_to_svg(
@@ -213,6 +264,21 @@ svg = pjsekai_scores_rs.sus_to_svg(
     target_segment_seconds=8.0,
     generator=None,  # optional: overrides the default "HarukiBot NEO"
 )
+
+png = pjsekai_scores_rs.sus_to_png(
+    "master.sus",
+    note_host="/path/to/notes",
+    style_sheet="",
+    target_segment_seconds=8.0,
+)
+
+jpg = pjsekai_scores_rs.sus_to_jpg(
+    "master.sus",
+    note_host="/path/to/notes",
+    style_sheet="",
+    target_segment_seconds=8.0,
+    jpeg_quality=90,
+)
 ```
 
 ---
@@ -222,7 +288,11 @@ svg = pjsekai_scores_rs.sus_to_svg(
 ### Current platform
 
 ```bash
+# Default wheel: SVG renderer and parser.
 maturin build --release
+
+# Optional wheel with direct Skia PNG/JPEG rendering for local/private use.
+maturin build --release --features python,skia-image
 ```
 
 ### Cross-compile for Linux x64 (from macOS/Windows, requires [zig](https://ziglang.org))
@@ -237,6 +307,8 @@ PYO3_CROSS=1 PYO3_CROSS_PYTHON_VERSION=3.13 \
   maturin build --release --target x86_64-unknown-linux-gnu --zig -i python3.13
 ```
 
+Add `--features python,skia-image` to build an optional Skia image wheel from source.
+
 ### Cross-compile for Windows x64 (requires MinGW `x86_64-w64-mingw32-gcc`)
 
 ```bash
@@ -244,13 +316,15 @@ PYO3_CROSS=1 PYO3_CROSS_PYTHON_VERSION=3.14 \
   maturin build --release --target x86_64-pc-windows-gnu -i python3.14t
 ```
 
+Add `--features python,skia-image` to build an optional Skia image wheel from source.
+
 ---
 
 ## Project Structure
 
 ```
 pjsekai-scores-rs/
-├── Cargo.toml          # Rust package manifest + PyO3 feature flag
+├── Cargo.toml          # Rust package manifest + PyO3/Skia feature flags
 ├── pyproject.toml      # maturin build config (module name: pjsekai_scores_rs)
 ├── css/                # Built-in CSS themes (default, black, white, guess)
 └── src/
@@ -262,7 +336,8 @@ pjsekai-scores-rs/
     ├── score.rs        # Score struct + 3-pass note linking + timing
     ├── lyric.rs        # Lyric / Word structs + parser
     ├── rebase.rs       # BPM/timing rebase transformation
-    ├── drawing.rs      # SVG renderer (~750 lines, direct String building)
+    ├── drawing.rs      # SVG renderer (direct String building)
+    ├── skia_direct.rs  # Direct Skia PNG/JPEG renderer
     ├── python.rs       # PyO3 bindings (Score, Drawing, Rebase, Lyric, Event)
     ├── notes.rs        # NoteData enum + NoteBase + arena index pattern
     └── notes/
@@ -275,6 +350,7 @@ pjsekai-scores-rs/
 ## Notes
 
 - The `python` feature gate enables PyO3. Without it, the crate builds as a pure Rust library + CLI binary with no Python dependency.
+- The `skia-image` feature enables direct PNG/JPEG output. Python wheels omit it by default; build from source with `--features python,skia-image` when image bytes are needed.
 - All `#[pyclass]` types are `Send + Sync` (no `Rc`/`RefCell`), satisfying Python 3.13t / 3.14t free-threaded requirements.
 - CSS is embedded at compile time via `include_str!` — no runtime file lookup required.
 - The `generate-import-lib` PyO3 feature is enabled so the Windows wheel can be cross-compiled without a local Windows Python installation.

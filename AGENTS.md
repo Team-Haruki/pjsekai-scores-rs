@@ -15,12 +15,15 @@ The original Python implementation lives at `../scores/` and is the reference fo
 ```bash
 # Rust only (crate + CLI)
 cargo build --release
+cargo build --release --features skia-image
 cargo check
 
 # Python wheel (current platform, active venv)
 maturin build --release
+maturin build --release --features python,skia-image
 # or for development install:
 maturin develop --release
+maturin develop --release --features python,skia-image
 
 # Python 3.14t free-threaded wheel (macOS ARM64)
 maturin build --release -i python3.14t

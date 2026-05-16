@@ -7,6 +7,9 @@ pub mod notes;
 pub mod rebase;
 pub mod score;
 
+#[cfg(feature = "skia-image")]
+pub mod skia_direct;
+
 // Re-exports for convenience
 pub use drawing::{Drawing, MusicMeta};
 pub use fraction::Fraction;
@@ -19,6 +22,11 @@ pub use notes::tap::{Tap, TapType};
 pub use notes::{NoteData, NoteIdx};
 pub use rebase::Rebase;
 pub use score::Score;
+
+#[cfg(feature = "skia-image")]
+pub use skia_direct::{
+    SkiaDirectError, SkiaImageFormat, score_to_skia_image, score_to_skia_jpeg, score_to_skia_png,
+};
 
 /// Python bindings via PyO3 (only compiled with `--features python`)
 #[cfg(feature = "python")]

@@ -9,17 +9,20 @@ A Rust rewrite of [pjsekai/scores](https://gitlab.com/pjsekai/scores) — a `.su
 ## Build and test commands
 
 ```bash
-cargo build --release          # Rust crate + CLI binary
-cargo check                    # Type check (pure Rust, no PyO3)
-cargo check --features python  # Type check with PyO3 bindings
-cargo test                     # Run all tests
-cargo test <test_name>         # Run a single test
-cargo clippy -- -D warnings    # Lint (CI requires clean)
-cargo fmt --all --check        # Format check (CI requires clean)
-cargo fmt                      # Auto-format
+cargo build --release                         # Standard CLI binary
+cargo build --release --features skia-image   # Skia image CLI binary
+cargo check                                   # Type check (pure Rust, no PyO3)
+cargo check --features python                 # Type check with PyO3 bindings
+cargo check --features 'python skia-image'    # Type check optional image bindings
+cargo test                                    # Run all tests
+cargo test <test_name>                        # Run a single test
+cargo clippy -- -D warnings                   # Lint (CI requires clean)
+cargo fmt --all --check                       # Format check (CI requires clean)
+cargo fmt                                     # Auto-format
 
-maturin build --release        # Build Python wheel (current platform)
-maturin develop --release      # Build + install wheel into active venv
+maturin build --release                       # Default Python wheel
+maturin build --release --features python,skia-image  # Optional Skia image wheel
+maturin develop --release                     # Build + install default wheel into active venv
 ```
 
 CI runs `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --all --check` on every push/PR to main.
@@ -27,7 +30,7 @@ CI runs `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --all --chec
 ## Architecture
 
 ### Dual distribution
-The `python` feature gate (`#[cfg(feature = "python")]`) enables PyO3 bindings in `python.rs`. Without it, the crate builds as a pure Rust library + CLI. The `pyproject.toml` / maturin config automatically enables this feature for wheel builds.
+The `python` feature gate (`#[cfg(feature = "python")]`) enables PyO3 bindings in `python.rs`. Without it, the crate builds as a pure Rust library + CLI. The `pyproject.toml` / maturin config automatically enables this feature for wheel builds. The `skia-image` feature is optional for Python wheels and must be requested explicitly when building Skia-enabled wheels.
 
 ### Arena pattern for notes
 Notes live in `Score::notes: Vec<NoteData>`. Cross-references (slide head/tail/next) use `NoteIdx = usize` with `NO_NOTE = usize::MAX`. Never use `Rc`, `Arc`, or `RefCell` — they break free-threaded Python (3.13t/3.14t) compatibility.

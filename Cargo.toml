@@ -2,12 +2,13 @@
 name = "pjsekai-scores-rs"
 version = "0.1.0"
 edition = "2024"
-description = "Project SEKAI score (.sus) parser and SVG chart renderer"
+description = "Project SEKAI score (.sus) parser, SVG chart renderer, and Skia image renderer"
 license = "MIT"
 
 [features]
 default = []
 python = ["dep:pyo3"]
+skia-image = ["dep:skia-safe"]
 
 [dependencies]
 num = "0.4.3"
@@ -15,6 +16,7 @@ regex = "1.12.3"
 serde_json = "1.0.149"
 clap = { version = "4.6.1", features = ["derive"] }
 pyo3 = { version = "0.28.3", features = ["extension-module", "generate-import-lib"], optional = true }
+skia-safe = { version = "0.97.0", optional = true }
 
 [lints.rust]
 # Free-threaded Python requires all #[pyclass] types to be Send + Sync.

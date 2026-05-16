@@ -1,6 +1,7 @@
 use pyo3::PyRef;
 use pyo3::PyRefMut;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 use pyo3::types::PyModule;
 
@@ -82,6 +83,102 @@ fn parse_music_meta(meta_dict: Option<&Bound<'_, PyDict>>) -> PyResult<Option<Mu
         skill_score_solo,
         skill_score_multi,
     }))
+}
+
+fn open_score_for_render(sus_path: &str, rebase_json: Option<&str>) -> PyResult<Score> {
+    let mut score = Score::open(sus_path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to open score: {e}")))?;
+
+    if let Some(json_str) = rebase_json {
+        let rebase = Rebase::from_json(json_str).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid rebase JSON: {e}"))
+        })?;
+        score = rebase.apply(&mut score);
+    }
+
+    Ok(score)
+}
+
+fn drawing_for_render(
+    note_host: Option<String>,
+    style_sheet: Option<String>,
+    skill: bool,
+    music_meta: Option<&Bound<'_, PyDict>>,
+    target_segment_seconds: Option<f64>,
+    generator: Option<String>,
+    note_asset_extension: Option<String>,
+) -> PyResult<Drawing> {
+    let mm = parse_music_meta(music_meta)?;
+    let mut drawing = Drawing::new(
+        note_host,
+        style_sheet,
+        skill,
+        mm,
+        target_segment_seconds,
+        generator,
+    );
+    if let Some(extension) = note_asset_extension {
+        drawing.set_note_asset_extension(extension);
+    }
+    Ok(drawing)
+}
+
+#[cfg(feature = "skia-image")]
+fn render_png_bytes(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+) -> PyResult<Vec<u8>> {
+    crate::score_to_skia_png(drawing, score, lyric).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to render PNG: {e}"))
+    })
+}
+
+#[cfg(feature = "skia-image")]
+fn render_jpeg_bytes(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+    quality: u8,
+) -> PyResult<Vec<u8>> {
+    let quality = checked_jpeg_quality(quality)?;
+    crate::score_to_skia_jpeg(drawing, score, lyric, quality).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to render JPEG: {e}"))
+    })
+}
+
+#[cfg(not(feature = "skia-image"))]
+fn render_png_bytes(
+    _drawing: &mut Drawing,
+    _score: &mut Score,
+    _lyric: Option<&Lyric>,
+) -> PyResult<Vec<u8>> {
+    Err(pyo3::exceptions::PyRuntimeError::new_err(
+        "PNG/JPEG output requires building with the `skia-image` feature",
+    ))
+}
+
+#[cfg(not(feature = "skia-image"))]
+fn render_jpeg_bytes(
+    _drawing: &mut Drawing,
+    _score: &mut Score,
+    _lyric: Option<&Lyric>,
+    _quality: u8,
+) -> PyResult<Vec<u8>> {
+    Err(pyo3::exceptions::PyRuntimeError::new_err(
+        "PNG/JPEG output requires building with the `skia-image` feature",
+    ))
+}
+
+#[cfg(feature = "skia-image")]
+fn checked_jpeg_quality(quality: u8) -> PyResult<u8> {
+    if quality <= 100 {
+        Ok(quality)
+    } else {
+        Err(pyo3::exceptions::PyValueError::new_err(
+            "jpeg_quality must be an integer from 0 to 100",
+        ))
+    }
 }
 
 #[pyclass(name = "Fraction", skip_from_py_object)]
@@ -495,7 +592,7 @@ struct PyDrawing {
 #[pymethods]
 impl PyDrawing {
     #[new]
-    #[pyo3(signature = (score=None, lyric=None, style_sheet=None, note_host=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None))]
+    #[pyo3(signature = (score=None, lyric=None, style_sheet=None, note_host=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
     fn new(
         score: Option<PyRef<'_, PyScore>>,
         lyric: Option<PyRef<'_, PyLyric>>,
@@ -505,18 +602,20 @@ impl PyDrawing {
         music_meta: Option<&Bound<'_, PyDict>>,
         target_segment_seconds: Option<f64>,
         generator: Option<String>,
+        note_asset_extension: Option<String>,
     ) -> PyResult<PyDrawing> {
-        let mm = parse_music_meta(music_meta)?;
+        let drawing = drawing_for_render(
+            note_host,
+            style_sheet,
+            skill,
+            music_meta,
+            target_segment_seconds,
+            generator,
+            note_asset_extension,
+        )?;
 
         Ok(PyDrawing {
-            inner: Drawing::new(
-                note_host,
-                style_sheet,
-                skill,
-                mm,
-                target_segment_seconds,
-                generator,
-            ),
+            inner: drawing,
             stored_score: score.map(|score| score.inner.clone()),
             stored_lyric: lyric.map(|lyric| lyric.inner.clone()),
         })
@@ -543,6 +642,71 @@ impl PyDrawing {
         })?;
         let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
         Ok(self.inner.svg(&mut stored_score, lyric_ref))
+    }
+
+    /// Generate PNG bytes from a score via direct Skia rendering
+    #[pyo3(signature = (score=None, lyric=None))]
+    fn png<'py>(
+        &mut self,
+        py: Python<'py>,
+        score: Option<PyRefMut<'_, PyScore>>,
+        lyric: Option<PyRef<'_, PyLyric>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let lyric_override = lyric.map(|lyric| lyric.inner.clone());
+
+        let bytes = if let Some(mut score) = score {
+            let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
+            render_png_bytes(&mut self.inner, &mut score.inner, lyric_ref)?
+        } else {
+            let mut stored_score = self.stored_score.clone().ok_or_else(|| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "score is required when Drawing was created without one",
+                )
+            })?;
+            let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
+            render_png_bytes(&mut self.inner, &mut stored_score, lyric_ref)?
+        };
+
+        Ok(PyBytes::new(py, &bytes))
+    }
+
+    /// Generate JPEG bytes from a score via direct Skia rendering
+    #[pyo3(signature = (score=None, lyric=None, jpeg_quality=90))]
+    fn jpg<'py>(
+        &mut self,
+        py: Python<'py>,
+        score: Option<PyRefMut<'_, PyScore>>,
+        lyric: Option<PyRef<'_, PyLyric>>,
+        jpeg_quality: u8,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let lyric_override = lyric.map(|lyric| lyric.inner.clone());
+
+        let bytes = if let Some(mut score) = score {
+            let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
+            render_jpeg_bytes(&mut self.inner, &mut score.inner, lyric_ref, jpeg_quality)?
+        } else {
+            let mut stored_score = self.stored_score.clone().ok_or_else(|| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "score is required when Drawing was created without one",
+                )
+            })?;
+            let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
+            render_jpeg_bytes(&mut self.inner, &mut stored_score, lyric_ref, jpeg_quality)?
+        };
+
+        Ok(PyBytes::new(py, &bytes))
+    }
+
+    /// Generate JPEG bytes from a score via direct Skia rendering
+    #[pyo3(signature = (score=None, lyric=None, jpeg_quality=90))]
+    fn jpeg<'py>(
+        &mut self,
+        py: Python<'py>,
+        score: Option<PyRefMut<'_, PyScore>>,
+        lyric: Option<PyRef<'_, PyLyric>>,
+        jpeg_quality: u8,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        self.jpg(py, score, lyric, jpeg_quality)
     }
 
     #[getter]
@@ -575,7 +739,7 @@ impl PyDrawing {
 
 /// Convenience function: parse a .sus file and generate SVG in one call
 #[pyfunction]
-#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None))]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
 fn sus_to_svg(
     sus_path: &str,
     note_host: Option<String>,
@@ -586,29 +750,116 @@ fn sus_to_svg(
     music_meta: Option<&Bound<'_, PyDict>>,
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
+    note_asset_extension: Option<String>,
 ) -> PyResult<String> {
-    let mut score = Score::open(sus_path)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("Failed to open score: {e}")))?;
-
-    if let Some(json_str) = rebase_json {
-        let rebase = Rebase::from_json(json_str).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid rebase JSON: {e}"))
-        })?;
-        score = rebase.apply(&mut score);
-    }
-
+    let mut score = open_score_for_render(sus_path, rebase_json)?;
     let lyric = lyric_content.map(Lyric::load);
-    let mm = parse_music_meta(music_meta)?;
-
-    let mut drawing = Drawing::new(
+    let mut drawing = drawing_for_render(
         note_host,
         style_sheet,
         skill,
-        mm,
+        music_meta,
         target_segment_seconds,
         generator,
-    );
+        note_asset_extension,
+    )?;
     Ok(drawing.svg(&mut score, lyric.as_ref()))
+}
+
+/// Convenience function: parse a .sus file and generate PNG bytes in one call
+#[pyfunction]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
+fn sus_to_png<'py>(
+    py: Python<'py>,
+    sus_path: &str,
+    note_host: Option<String>,
+    style_sheet: Option<String>,
+    rebase_json: Option<&str>,
+    lyric_content: Option<&str>,
+    skill: bool,
+    music_meta: Option<&Bound<'_, PyDict>>,
+    target_segment_seconds: Option<f64>,
+    generator: Option<String>,
+    note_asset_extension: Option<String>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let mut score = open_score_for_render(sus_path, rebase_json)?;
+    let lyric = lyric_content.map(Lyric::load);
+    let mut drawing = drawing_for_render(
+        note_host,
+        style_sheet,
+        skill,
+        music_meta,
+        target_segment_seconds,
+        generator,
+        note_asset_extension,
+    )?;
+    let bytes = render_png_bytes(&mut drawing, &mut score, lyric.as_ref())?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
+/// Convenience function: parse a .sus file and generate JPEG bytes in one call
+#[pyfunction]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
+fn sus_to_jpg<'py>(
+    py: Python<'py>,
+    sus_path: &str,
+    note_host: Option<String>,
+    style_sheet: Option<String>,
+    rebase_json: Option<&str>,
+    lyric_content: Option<&str>,
+    skill: bool,
+    music_meta: Option<&Bound<'_, PyDict>>,
+    target_segment_seconds: Option<f64>,
+    generator: Option<String>,
+    note_asset_extension: Option<String>,
+    jpeg_quality: u8,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let mut score = open_score_for_render(sus_path, rebase_json)?;
+    let lyric = lyric_content.map(Lyric::load);
+    let mut drawing = drawing_for_render(
+        note_host,
+        style_sheet,
+        skill,
+        music_meta,
+        target_segment_seconds,
+        generator,
+        note_asset_extension,
+    )?;
+    let bytes = render_jpeg_bytes(&mut drawing, &mut score, lyric.as_ref(), jpeg_quality)?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
+/// Convenience function: parse a .sus file and generate JPEG bytes in one call
+#[pyfunction]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
+fn sus_to_jpeg<'py>(
+    py: Python<'py>,
+    sus_path: &str,
+    note_host: Option<String>,
+    style_sheet: Option<String>,
+    rebase_json: Option<&str>,
+    lyric_content: Option<&str>,
+    skill: bool,
+    music_meta: Option<&Bound<'_, PyDict>>,
+    target_segment_seconds: Option<f64>,
+    generator: Option<String>,
+    note_asset_extension: Option<String>,
+    jpeg_quality: u8,
+) -> PyResult<Bound<'py, PyBytes>> {
+    sus_to_jpg(
+        py,
+        sus_path,
+        note_host,
+        style_sheet,
+        rebase_json,
+        lyric_content,
+        skill,
+        music_meta,
+        target_segment_seconds,
+        generator,
+        note_asset_extension,
+        jpeg_quality,
+    )
 }
 
 /// Register all Python types and functions
@@ -621,5 +872,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRebase>()?;
     m.add_class::<PyDrawing>()?;
     m.add_function(wrap_pyfunction!(sus_to_svg, m)?)?;
+    m.add_function(wrap_pyfunction!(sus_to_png, m)?)?;
+    m.add_function(wrap_pyfunction!(sus_to_jpg, m)?)?;
+    m.add_function(wrap_pyfunction!(sus_to_jpeg, m)?)?;
     Ok(())
 }

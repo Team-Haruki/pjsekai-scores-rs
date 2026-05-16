@@ -4,6 +4,12 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      skia_image:
+        description: Build wheels with optional Skia image output support
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -11,11 +17,9 @@ permissions:
 env:
   # Extract version from tag (strips 'v' prefix), fallback to 0.0.0 for workflow_dispatch
   RELEASE_VERSION: ${{ github.event_name == 'release' && github.ref_name || 'v0.0.0' }}
+  PYTHON_FEATURES: ${{ github.event_name == 'workflow_dispatch' && inputs.skia_image && 'python,skia-image' || 'python' }}
 
 jobs:
-  # ──────────────────────────────────────────────
-  # Build wheels for Linux (x86_64, aarch64)
-  # ──────────────────────────────────────────────
   # ──────────────────────────────────────────────
   # Build wheels for Linux (x86_64, aarch64)
   # ──────────────────────────────────────────────
@@ -37,7 +41,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --features ${{ env.PYTHON_FEATURES }}
           sccache: "true"
           manylinux: auto
       - name: Upload wheels
@@ -70,7 +74,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python3.13t python3.14t
+          args: --release --out dist --interpreter python3.13t python3.14t --features ${{ env.PYTHON_FEATURES }}
           sccache: "true"
           manylinux: manylinux_2_28
       - name: Upload wheels
@@ -112,7 +116,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --features ${{ env.PYTHON_FEATURES }}
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -151,7 +155,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x64
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter --features ${{ env.PYTHON_FEATURES }}
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v7

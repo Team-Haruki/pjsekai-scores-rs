@@ -10,10 +10,10 @@ permissions:
 
 jobs:
   build:
-    name: Build CLI (${{ matrix.target }})
+    name: Build CLI (${{ matrix.platform.target }}, ${{ matrix.variant.name }})
     strategy:
       matrix:
-        include:
+        platform:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             ext: ""
@@ -29,7 +29,14 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             ext: ".exe"
-    runs-on: ${{ matrix.os }}
+        variant:
+          - name: standard
+            suffix: ""
+            cargo_args: ""
+          - name: skia-image
+            suffix: "-skia-image"
+            cargo_args: "--features skia-image"
+    runs-on: ${{ matrix.platform.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -46,21 +53,21 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.platform.target }}
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }} --bin pjsekai-scores-rs
+        run: cargo build --release --target ${{ matrix.platform.target }} --bin pjsekai-scores-rs ${{ matrix.variant.cargo_args }}
       - name: Package binary
         shell: bash
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/pjsekai-scores-rs${{ matrix.ext }} \
-             dist/pjsekai-scores-rs-${{ matrix.target }}${{ matrix.ext }}
+          cp target/${{ matrix.platform.target }}/release/pjsekai-scores-rs${{ matrix.platform.ext }} \
+             dist/pjsekai-scores-rs${{ matrix.variant.suffix }}-${{ matrix.platform.target }}${{ matrix.platform.ext }}
       - name: Upload binary
         uses: actions/upload-artifact@v7
         with:
-          name: cli-${{ matrix.target }}
+          name: cli-${{ matrix.variant.name }}-${{ matrix.platform.target }}
           path: dist/
 
   publish:

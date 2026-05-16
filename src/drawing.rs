@@ -39,6 +39,7 @@ pub struct DrawingConfig {
     pub tick_length: i32,
     pub tick_2_length: i32,
     pub note_host: String,
+    pub note_asset_extension: String,
     pub target_segment_seconds: f64,
     /// Generator name shown in the SVG subtitle (default: "HarukiBot NEO")
     pub generator: String,
@@ -59,6 +60,7 @@ impl Default for DrawingConfig {
             tick_length: 24,
             tick_2_length: 8,
             note_host: "https://asset3.pjsekai.moe/live/note/custom01".to_string(),
+            note_asset_extension: "png".to_string(),
             target_segment_seconds: 8.0,
             generator: "HarukiBot NEO".to_string(),
         }
@@ -84,6 +86,15 @@ pub struct MusicMeta {
 }
 
 type BezierPoints = [(f64, f64); 4];
+
+#[derive(Debug, Clone, Copy)]
+enum AmongKind {
+    LongAmong,
+    LongAmongCritical,
+    FrictionLong,
+    FrictionFlick,
+    FrictionCritical,
+}
 
 impl Drawing {
     pub fn new(
@@ -118,6 +129,10 @@ impl Drawing {
             music_meta,
             special_cover_objects: Vec::new(),
         }
+    }
+
+    pub fn set_note_asset_extension(&mut self, extension: impl Into<String>) {
+        self.config.note_asset_extension = normalize_note_asset_extension(extension.into());
     }
 
     /// Generate a complete SVG string from a score
@@ -338,7 +353,7 @@ impl Drawing {
         svg
     }
 
-    fn build_skill_covers(&mut self, score: &mut Score) {
+    pub(crate) fn build_skill_covers(&mut self, score: &mut Score) {
         if let Some(ref mm) = self.music_meta {
             for e in &score.events.clone() {
                 if e.text.as_deref() == Some("SUPER FEVER!!") {
@@ -411,11 +426,7 @@ impl Drawing {
                 r#"<symbol id="notes-{note_number}" viewBox="0 0 112 56">"#,
             )
             .unwrap();
-            write!(
-                svg,
-                r#"<image href="{}/notes_{note_number}.png" x="-3" y="-3" width="118" height="62"/>"#,
-                self.config.note_host,
-            ).unwrap();
+            self.write_note_symbol_body(svg, note_number, -3.0, -3.0, 118.0, 62.0);
             svg.push_str("</symbol>");
 
             // Middle symbol
@@ -425,13 +436,14 @@ impl Drawing {
                 112 * note_m_ratio,
             )
             .unwrap();
-            write!(
+            self.write_note_symbol_body(
                 svg,
-                r#"<image href="{}/notes_{note_number}.png" x="{}" y="-3" width="{}" height="62" preserveAspectRatio="none"/>"#,
-                self.config.note_host,
-                -(3 + 28) * note_m_ratio,
-                118 * note_m_ratio,
-            ).unwrap();
+                note_number,
+                (-(3 + 28) * note_m_ratio) as f64,
+                -3.0,
+                (118 * note_m_ratio) as f64,
+                62.0,
+            );
             svg.push_str("</symbol>");
 
             // Per-lane symbols
@@ -497,6 +509,28 @@ impl Drawing {
                 svg.push_str("</symbol>");
             }
         }
+    }
+
+    fn write_note_symbol_body(
+        &self,
+        svg: &mut String,
+        note_number: i32,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) {
+        write!(
+            svg,
+            r#"<image href="{}/notes_{note_number}.{}" x="{}" y="{}" width="{}" height="{}"/>"#,
+            self.config.note_host,
+            self.config.note_asset_extension,
+            format_g(x),
+            format_g(y),
+            format_g(width),
+            format_g(height),
+        )
+        .unwrap();
     }
 
     /// Render a single segment (sentence) of the chart
@@ -1100,16 +1134,7 @@ impl Drawing {
                 let h = cfg.lane_width as f64;
 
                 let is_crit = arena[among_idx].is_critical(arena);
-                write!(
-                    among_images,
-                    r#"<image href="{}/notes_long_among{}.png" x="{}" y="{}" width="{}" height="{}"/>"#,
-                    self.config.note_host,
-                    if is_crit { "_crtcl" } else { "" },
-                    round(x - w / 2.0),
-                    round(y - h / 2.0),
-                    round(w),
-                    round(h),
-                ).unwrap();
+                self.write_long_among_image(is_crit, x - w / 2.0, y - h / 2.0, w, h, among_images);
             }
 
             cur_idx = next_idx;
@@ -1342,23 +1367,60 @@ impl Drawing {
         let w = cfg.lane_width as f64 * 0.75;
         let h = cfg.lane_width as f64 * 0.75;
 
-        let suffix = if note.is_critical(arena) {
-            "_crtcl"
+        let kind = if note.is_critical(arena) {
+            AmongKind::FrictionCritical
         } else if note.is_directional() {
-            "_flick"
+            AmongKind::FrictionFlick
         } else {
-            "_long"
+            AmongKind::FrictionLong
         };
 
+        self.write_among_image(kind, x - w / 2.0, y - h / 2.0, w, h, out);
+    }
+
+    fn write_long_among_image(
+        &self,
+        is_critical: bool,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        out: &mut String,
+    ) {
+        let kind = if is_critical {
+            AmongKind::LongAmongCritical
+        } else {
+            AmongKind::LongAmong
+        };
+        self.write_among_image(kind, x, y, width, height, out);
+    }
+
+    fn write_among_image(
+        &self,
+        kind: AmongKind,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+        out: &mut String,
+    ) {
+        let filename = match kind {
+            AmongKind::LongAmong => "notes_long_among",
+            AmongKind::LongAmongCritical => "notes_long_among_crtcl",
+            AmongKind::FrictionLong => "notes_friction_among_long",
+            AmongKind::FrictionFlick => "notes_friction_among_flick",
+            AmongKind::FrictionCritical => "notes_friction_among_crtcl",
+        };
         write!(
             out,
-            r#"<image href="{}/notes_friction_among{}.png" x="{}" y="{}" width="{}" height="{}"/>"#,
+            r#"<image href="{}/{}.{}" x="{}" y="{}" width="{}" height="{}"/>"#,
             self.config.note_host,
-            suffix,
-            round(x - w / 2.0),
-            round(y - h / 2.0),
-            round(w),
-            round(h),
+            filename,
+            self.config.note_asset_extension,
+            round(x),
+            round(y),
+            round(width),
+            round(height),
         )
         .unwrap();
     }
@@ -1430,20 +1492,26 @@ impl Drawing {
         let is_crit = note.is_critical(arena);
 
         let mut img = String::new();
+        let img_x = x - w / 2.0 + bias;
+        let img_y = y + cfg.note_size as f64 / 4.0 - h;
+
+        let flip_right = matches!(flick_type, DirectionalType::UpperRight);
         write!(
             img,
-            r#"<image href="{}/notes_flick_arrow{}_{:02}{}.png" x="{}" y="{}" width="{}" height="{}""#,
+            r#"<image href="{}/notes_flick_arrow{}_{:02}{}.{}" x="{}" y="{}" width="{}" height="{}""#,
             self.config.note_host,
             if is_crit { "_crtcl" } else { "" },
             width,
             if is_diagonal { "_diagonal" } else { "" },
-            round(x - w / 2.0 + bias),
-            round(y + cfg.note_size as f64 / 4.0 - h),
+            self.config.note_asset_extension,
+            round(img_x),
+            round(img_y),
             round(w),
             round(h),
-        ).unwrap();
+        )
+        .unwrap();
 
-        if matches!(flick_type, DirectionalType::UpperRight) {
+        if flip_right {
             write!(
                 img,
                 r#" transform-origin="{} 0" transform="scale(-1, 1)""#,
@@ -1606,6 +1674,13 @@ fn escape_xml(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+fn normalize_note_asset_extension(extension: String) -> String {
+    extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
 }
 
 /// Format a float like Python's %g (6 significant digits, trailing zeros removed,
