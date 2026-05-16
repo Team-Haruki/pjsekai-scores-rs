@@ -15,13 +15,9 @@ install_rpm_deps() {
 
 install_apt_deps() {
   case "$target" in
-    x86_64)
+    x86_64 | aarch64)
       apt-get update
       apt-get install -y libfontconfig1-dev libfreetype6-dev pkg-config
-      ;;
-    aarch64)
-      apt-get update
-      apt-get install -y libfontconfig1-dev-arm64-cross libfreetype6-dev-arm64-cross pkg-config
       ;;
     *)
       echo "Unsupported Skia Linux target: $target" >&2
