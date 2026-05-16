@@ -43,11 +43,24 @@ EOF
           libfontconfig-dev:arm64 \
           libfreetype-dev:arm64 \
           pkg-config
-        mkdir -p /usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/lib
+        local target_lib_dir="/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/lib"
+        mkdir -p "$target_lib_dir" .cargo
         ln -sf /usr/lib/aarch64-linux-gnu/libfontconfig.so \
-          /usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/lib/libfontconfig.so
+          "$target_lib_dir/libfontconfig.so"
+        ln -sf /usr/lib/aarch64-linux-gnu/libfontconfig.so.1 \
+          "$target_lib_dir/libfontconfig.so.1"
         ln -sf /usr/lib/aarch64-linux-gnu/libfreetype.so \
-          /usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/lib/libfreetype.so
+          "$target_lib_dir/libfreetype.so"
+        ln -sf /usr/lib/aarch64-linux-gnu/libfreetype.so.6 \
+          "$target_lib_dir/libfreetype.so.6"
+        cat >>.cargo/config.toml <<EOF
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = [
+  "-L", "native=$target_lib_dir",
+  "-L", "native=/usr/lib/aarch64-linux-gnu",
+]
+EOF
       fi
       ;;
     *)
