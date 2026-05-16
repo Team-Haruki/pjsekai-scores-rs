@@ -14,10 +14,41 @@ install_rpm_deps() {
 }
 
 install_apt_deps() {
+  local host_arch
+  host_arch="$(dpkg --print-architecture)"
+
   case "$target" in
-    x86_64 | aarch64)
+    x86_64)
       apt-get update
       apt-get install -y libfontconfig1-dev libfreetype6-dev pkg-config
+      ;;
+    aarch64)
+      if [[ "$host_arch" == "arm64" ]]; then
+        apt-get update
+        apt-get install -y libfontconfig1-dev libfreetype6-dev pkg-config
+      else
+        for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+          [[ -f "$source_file" ]] || continue
+          sed -i -E 's|^deb (\[[^]]+\] )?http|deb [arch=amd64] http|' "$source_file"
+        done
+        dpkg --add-architecture arm64
+        cat >/etc/apt/sources.list.d/arm64-ports.list <<'EOF'
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-backports main restricted universe multiverse
+EOF
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          libfontconfig-dev:arm64 \
+          libfreetype-dev:arm64 \
+          pkg-config
+        mkdir -p /usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/lib
+        ln -sf /usr/lib/aarch64-linux-gnu/libfontconfig.so \
+          /usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/lib/libfontconfig.so
+        ln -sf /usr/lib/aarch64-linux-gnu/libfreetype.so \
+          /usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/lib/libfreetype.so
+      fi
       ;;
     *)
       echo "Unsupported Skia Linux target: $target" >&2
