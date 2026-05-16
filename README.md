@@ -7,7 +7,7 @@ Project SEKAI score (`.sus`) parser, SVG chart renderer, and direct Skia image r
 
 ## Features
 
-- Parses `.sus` format score files (Score format specification v2.7 rev2)
+- Parses `.sus` score files and Project SEKAI custom chart JSON
 - Generates SVG chart images with full note rendering (Tap / Directional / Slide)
 - Generates PNG/JPEG chart images directly with Skia, without SVG rasterization
 - BPM rebase support (custom timing via JSON)
@@ -38,9 +38,11 @@ The dominant win is SVG generation: Rust replaces thousands of Python `svgwrite`
 pjsekai-scores-rs <SCORE> [OPTIONS]
 
 Arguments:
-  <SCORE>  The .sus score file
+  <SCORE>  The score file (.sus or Project SEKAI custom chart JSON)
 
 Options:
+      --score-format <SCORE_FORMAT>
+                                 Input score format [default: auto] [possible values: auto, sus, json]
       --rebase <REBASE>          Customized BPM, beats and sections (JSON)
       --lyric <LYRIC>            Lyrics file
       --css <CSS>                Custom CSS stylesheet
@@ -71,6 +73,9 @@ Options:
 ```bash
 # Basic conversion
 pjsekai-scores-rs master.sus -o master.svg
+
+# Project SEKAI custom chart JSON is auto-detected from .json files.
+pjsekai-scores-rs custom-chart.json -o custom-chart.svg
 
 # With custom BPM rebase and lyrics
 pjsekai-scores-rs master.sus --rebase rebase.json --lyric lyrics.txt -o master.svg
@@ -163,14 +168,30 @@ GitHub CLI releases build both variants for each target. Skia-enabled assets are
 ### Installation
 
 ```bash
+# Default package: parser + SVG renderer.
 pip install pjsekai-scores-rs
+
+# Skia package: parser + SVG renderer + direct PNG/JPEG output.
+pip install pjsekai-scores-rs-skia-image
 ```
 
 or with uv:
 
 ```bash
+# Default package: parser + SVG renderer.
 uv add pjsekai-scores-rs
+
+# Skia package: parser + SVG renderer + direct PNG/JPEG output.
+uv add pjsekai-scores-rs-skia-image
 ```
+
+Both packages expose the same Python module name:
+
+```python
+import pjsekai_scores_rs
+```
+
+Install one package or the other in an environment. The `pjsekai-scores-rs-skia-image` package is the optional image-output build; installing both packages at once is not supported because they provide the same extension module.
 
 Or build and install from source (requires [maturin](https://github.com/PyO3/maturin)):
 
@@ -184,13 +205,31 @@ maturin develop --release --features python,skia-image
 
 ### Python API
 
+#### Score loading
+
+`Score` is the shared parsed chart type used by SVG, Skia PNG/JPEG, timing APIs, and rebase. It accepts both `.sus` and Project SEKAI custom chart JSON.
+
 ```python
-import pjsekai_scores_rs
+import pjsekai_scores_rs as scores
 
-# ── Score ─────────────────────────────────────────────────────────────────────
-score = pjsekai_scores_rs.Score.open("master.sus")          # load from file
-score = pjsekai_scores_rs.Score.from_str(sus_text)          # load from string
+# Auto-detect by file extension/content: .sus or custom chart JSON.
+score = scores.Score.open("master.sus")
+score = scores.Score.open("chart.json")
 
+# Force a format when needed.
+score = scores.Score.open_sus("master.sus")
+score = scores.Score.open_json("chart.json")
+
+# Load from in-memory content.
+score = scores.Score.from_str(sus_text)          # SUS only
+score = scores.Score.from_json(json_text)        # JSON string or file-like object
+score = scores.Score.from_dict(chart_dict)       # Python dict
+score = scores.Score.load(sus_text_or_json_dict) # auto-detect string/file-like/dict
+```
+
+#### Score metadata and timing
+
+```python
 score.set_meta(
     title="Song Title",
     artist="Artist Name",
@@ -198,27 +237,84 @@ score.set_meta(
     playlevel="30",
     jacket="file:///path/to/jacket.png",
     songid="1",
+    subtitle="Optional subtitle",
 )
 
-score.title()        # -> Optional[str]
-score.artist()       # -> Optional[str]
-score.difficulty()   # -> Optional[str]
-score.playlevel()    # -> Optional[str]
+score.title()        # -> str | None
+score.artist()       # -> str | None
+score.difficulty()   # -> str | None
+score.playlevel()    # -> str | None
 score.note_count()   # -> int
 score.event_count()  # -> int
-score.events()       # -> List[Event]  (each has .bar, .bpm, .speed, .text)
 
-# ── Rebase ────────────────────────────────────────────────────────────────────
-rebase = pjsekai_scores_rs.Rebase.from_json('{"musicId":1,"events":[{"bar":0,"bpm":160}]}')
-rebase = pjsekai_scores_rs.Rebase.from_dict({"musicId": 1, "events": [{"bar": 0, "bpm": 160}]})
+meta = score.meta
+meta.title           # -> str | None
+meta.subtitle        # -> str | None
+meta.artist          # -> str | None
+meta.genre           # -> str | None
+meta.designer        # -> str | None
+meta.difficulty      # -> str | None
+meta.playlevel       # -> str | None
+meta.songid          # -> str | None
+meta.wave            # -> str | None
+meta.waveoffset      # -> str | None
+meta.jacket          # -> str | None
+meta.background      # -> str | None
+meta.movie           # -> str | None
+meta.movieoffset     # -> float | None
+meta.basebpm         # -> float | None
+
+bar = scores.Fraction(4, 3)
+time = score.get_time(bar)                    # -> Fraction
+event = score.get_event(bar)                  # -> Event
+delta = score.get_time_delta(0, bar)          # -> Fraction
+bar_again = score.get_bar_by_time(float(time))
+
+for event in score.events():
+    event.bar              # -> Fraction
+    event.bpm              # -> Fraction | None
+    event.bar_length       # -> Fraction | None
+    event.sentence_length  # -> int | None
+    event.speed            # -> float | None
+    event.section          # -> str | None
+    event.text             # -> str | None
+```
+
+#### Fraction
+
+`Fraction` is accepted by timing methods. Plain `int`, `float`, and fraction-like strings such as `"3/2"` are also accepted where a bar value is expected.
+
+```python
+bar = scores.Fraction(3, 2)
+bar.numerator       # -> int
+bar.denominator     # -> int
+float(bar)          # -> 1.5
+bar.limit_denominator(1000)
+```
+
+#### Rebase and lyric
+
+```python
+rebase = scores.Rebase.from_json('{"musicId":1,"events":[{"bar":0,"bpm":160}]}')
+rebase = scores.Rebase.from_dict({"musicId": 1, "events": [{"bar": 0, "bpm": 160}]})
+rebase = scores.Rebase.load(rebase_json_or_dict_or_file)
+
 rebased_score = rebase.apply(score)
+rebased_score = rebase.rebase(score)
+rebased_score = rebase(score)
 
-# ── Lyric ─────────────────────────────────────────────────────────────────────
-lyric = pjsekai_scores_rs.Lyric.load(lyric_text)   # load from string
+lyric = scores.Lyric.load(lyric_text_or_file)
 lyric.word_count()  # -> int
+```
 
-# ── Drawing ───────────────────────────────────────────────────────────────────
-drawing = pjsekai_scores_rs.Drawing(
+#### Drawing
+
+`Drawing` can render any `Score`, whether it came from SUS or JSON. `png()`, `jpg()`, and `jpeg()` require the `pjsekai-scores-rs-skia-image` package or a local build with `--features python,skia-image`.
+
+```python
+drawing = scores.Drawing(
+    score=None,             # optional stored score
+    lyric=None,             # optional stored lyric
     note_host="https://asset3.pjsekai.moe/live/note/custom01",
     style_sheet="",         # extra CSS appended after the built-in theme
     skill=False,            # render skill/fever overlays
@@ -228,33 +324,30 @@ drawing = pjsekai_scores_rs.Drawing(
         "skill_score_solo": [0.10, 0.15, 0.20, 0.25],
         "skill_score_multi": [0.05, 0.10, 0.15, 0.20],
     },
-    target_segment_seconds=8.0,  # approximate seconds per chart column
-    generator="MyBot v1.0",      # optional: overrides the default "HarukiBot NEO"
+    target_segment_seconds=8.0,
+    generator="MyBot v1.0",
+    note_asset_extension="png",
 )
 
-# Configurable properties
-drawing.note_size = 18      # note sprite size in pixels (default 16)
-drawing.time_height = 240.0 # pixels per second (default 360.0)
-drawing.lane_width = 16     # lane width in pixels (default 16)
+drawing.note_size = 18
+drawing.time_height = 240.0
+drawing.lane_width = 16
 
-svg_string = drawing.svg(score)              # returns str
-svg_string = drawing.svg(score, lyric=lyric) # with lyrics
-png_bytes = drawing.png(score)               # requires a skia-image wheel
-jpg_bytes = drawing.jpg(score)               # requires a skia-image wheel, quality defaults to 90
+svg_string = drawing.svg(score)
+svg_string = drawing.svg(score, lyric=lyric)
 
-# Write to file
-with open("master.svg", "w") as f:
-    f.write(svg_string)
+png_bytes = drawing.png(score)
+jpg_bytes = drawing.jpg(score, jpeg_quality=90)
+jpeg_bytes = drawing.jpeg(score, jpeg_quality=90)
+```
 
-with open("master.png", "wb") as f:
-    f.write(png_bytes)
+#### Convenience functions
 
-with open("master.jpg", "wb") as f:
-    f.write(jpg_bytes)
+Use `score_to_*` for new code. The `sus_to_*` names are kept for compatibility and now also use the same auto-detecting score loader.
 
-# ── Convenience function ──────────────────────────────────────────────────────
-svg = pjsekai_scores_rs.sus_to_svg(
-    "master.sus",
+```python
+svg = scores.score_to_svg(
+    "master.sus",  # or "chart.json"
     note_host="https://asset3.pjsekai.moe/live/note/custom01",
     style_sheet="",
     rebase_json='{"musicId":1,"events":[{"bar":0,"bpm":160}]}',
@@ -262,23 +355,45 @@ svg = pjsekai_scores_rs.sus_to_svg(
     skill=False,
     music_meta=None,
     target_segment_seconds=8.0,
-    generator=None,  # optional: overrides the default "HarukiBot NEO"
+    generator=None,
+    note_asset_extension=None,
 )
 
-png = pjsekai_scores_rs.sus_to_png(
-    "master.sus",
+png = scores.score_to_png(
+    "chart.json",
     note_host="/path/to/notes",
     style_sheet="",
     target_segment_seconds=8.0,
 )
 
-jpg = pjsekai_scores_rs.sus_to_jpg(
-    "master.sus",
+jpg = scores.score_to_jpg(
+    "chart.json",
     note_host="/path/to/notes",
     style_sheet="",
     target_segment_seconds=8.0,
     jpeg_quality=90,
 )
+
+jpeg = scores.score_to_jpeg("chart.json", note_host="/path/to/notes")
+
+# Backward-compatible aliases.
+svg = scores.sus_to_svg("master.sus")
+png = scores.sus_to_png("master.sus", note_host="/path/to/notes")
+jpg = scores.sus_to_jpg("master.sus", note_host="/path/to/notes")
+jpeg = scores.sus_to_jpeg("master.sus", note_host="/path/to/notes")
+```
+
+#### Writing output files
+
+```python
+with open("master.svg", "w", encoding="utf-8") as f:
+    f.write(svg_string)
+
+with open("master.png", "wb") as f:
+    f.write(png_bytes)
+
+with open("master.jpg", "wb") as f:
+    f.write(jpg_bytes)
 ```
 
 ---
@@ -291,9 +406,11 @@ jpg = pjsekai_scores_rs.sus_to_jpg(
 # Default wheel: SVG renderer and parser.
 maturin build --release
 
-# Optional wheel with direct Skia PNG/JPEG rendering for local/private use.
+# Optional wheel with direct Skia PNG/JPEG rendering.
 maturin build --release --features python,skia-image
 ```
+
+The release workflow publishes that Skia-enabled build under the separate distribution name `pjsekai-scores-rs-skia-image` while keeping the import module as `pjsekai_scores_rs`.
 
 ### Cross-compile for Linux x64 (from macOS/Windows, requires [zig](https://ziglang.org))
 
@@ -334,6 +451,7 @@ pjsekai-scores-rs/
     ├── meta.rs         # Score metadata (title, artist, difficulty, …)
     ├── line.rs         # .sus format line parser (LazyLock regexes, base36)
     ├── score.rs        # Score struct + 3-pass note linking + timing
+    ├── score_json.rs   # Project SEKAI custom chart JSON parser
     ├── lyric.rs        # Lyric / Word structs + parser
     ├── rebase.rs       # BPM/timing rebase transformation
     ├── drawing.rs      # SVG renderer (direct String building)
@@ -350,6 +468,7 @@ pjsekai-scores-rs/
 ## Notes
 
 - The `python` feature gate enables PyO3. Without it, the crate builds as a pure Rust library + CLI binary with no Python dependency.
+- `Score::open()` and `Score::parse_auto()` auto-detect JSON-looking custom chart input; use `Score::open_sus()` / `Score::parse()` or `Score::open_json()` / `Score::parse_json()` to force a format.
 - The `skia-image` feature enables direct PNG/JPEG output. Python wheels omit it by default; build from source with `--features python,skia-image` when image bytes are needed.
 - All `#[pyclass]` types are `Send + Sync` (no `Rc`/`RefCell`), satisfying Python 3.13t / 3.14t free-threaded requirements.
 - CSS is embedded at compile time via `include_str!` — no runtime file lookup required.

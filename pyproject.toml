@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "pjsekai-scores-rs"
 version = "0.1.0"
-description = "Project SEKAI score (.sus) parser, SVG chart renderer, and Skia image renderer (Rust implementation)"
+description = "Project SEKAI score (.sus) parser, SVG chart renderer, and optional Skia image renderer (Rust implementation)"
 requires-python = ">=3.9"
 
 [tool.maturin]

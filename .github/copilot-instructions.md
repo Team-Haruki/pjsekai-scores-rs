@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` parser and SVG chart renderer. Distributed as a Rust crate (`pjsekai-scores-rs`) and a Python wheel (`pjsekai-scores-rs` on PyPI, module `pjsekai_scores_rs`) via PyO3 0.28.2 / maturin.
+Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` parser, Project SEKAI custom chart JSON parser, and SVG chart renderer. Distributed as a Rust crate (`pjsekai-scores-rs`) and Python wheels via PyO3 0.28.2 / maturin. The default PyPI package is `pjsekai-scores-rs`; the optional Skia image-output package is `pjsekai-scores-rs-skia-image`. Both import as `pjsekai_scores_rs`.
 
 **Do not modify `../scores/`** — it is the read-only reference Python implementation.
 
@@ -72,7 +72,7 @@ format!(r#"<use href="#{id}"/>"#, id = id)    // ❌ syntax error
 
 ## Python API conventions
 
-Public Python-facing names use snake_case matching the original `pjsekai.scores` API where possible. The Python package on PyPI is `pjsekai-scores-rs`; import as `import pjsekai_scores_rs`. Key differences from the Python original that must be preserved:
+Public Python-facing names use snake_case matching the original `pjsekai.scores` API where possible. The Python packages on PyPI are `pjsekai-scores-rs` and `pjsekai-scores-rs-skia-image`; both import as `import pjsekai_scores_rs`. Key differences from the Python original that must be preserved:
 
 - `Score.set_meta(**kwargs)` (not attribute assignment)
 - `Rebase.from_dict(d).apply(score)` (not `load_from_dict` / `rebase`)
@@ -80,6 +80,7 @@ Public Python-facing names use snake_case matching the original `pjsekai.scores`
 - `Lyric.load(string)` (not file object)
 - `score.events()` is a method (not attribute)
 - `Drawing(generator=…)` and `sus_to_svg(generator=…)` accept an optional generator name (default `"HarukiBot NEO"`)
+- `Score.open(path)` auto-detects `.sus` and custom chart JSON. Use `Score.open_sus()` / `Score.from_str()` or `Score.open_json()` / `Score.from_json()` when the format must be explicit.
 
 ---
 

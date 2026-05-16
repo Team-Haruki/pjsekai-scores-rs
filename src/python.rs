@@ -154,7 +154,7 @@ fn render_png_bytes(
     _lyric: Option<&Lyric>,
 ) -> PyResult<Vec<u8>> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
-        "PNG/JPEG output requires building with the `skia-image` feature",
+        "PNG/JPEG output requires the `skia-image` feature; install `pjsekai-scores-rs-skia-image` or build with `--features python,skia-image`",
     ))
 }
 
@@ -166,7 +166,7 @@ fn render_jpeg_bytes(
     _quality: u8,
 ) -> PyResult<Vec<u8>> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
-        "PNG/JPEG output requires building with the `skia-image` feature",
+        "PNG/JPEG output requires the `skia-image` feature; install `pjsekai-scores-rs-skia-image` or build with `--features python,skia-image`",
     ))
 }
 
@@ -367,7 +367,7 @@ struct PyScore {
 
 #[pymethods]
 impl PyScore {
-    /// Open and parse a .sus file
+    /// Open and parse a score file (.sus or Project SEKAI custom chart JSON)
     #[staticmethod]
     fn open(path: &str) -> PyResult<PyScore> {
         let score = Score::open(path).map_err(|e| {
@@ -376,12 +376,66 @@ impl PyScore {
         Ok(PyScore { inner: score })
     }
 
-    /// Parse from string content
+    /// Open and parse a .sus file
+    #[staticmethod]
+    fn open_sus(path: &str) -> PyResult<PyScore> {
+        let score = Score::open_sus(path).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(format!("Failed to open SUS score: {e}"))
+        })?;
+        Ok(PyScore { inner: score })
+    }
+
+    /// Open and parse Project SEKAI custom chart JSON
+    #[staticmethod]
+    fn open_json(path: &str) -> PyResult<PyScore> {
+        let score = Score::open_json(path).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(format!("Failed to open JSON score: {e}"))
+        })?;
+        Ok(PyScore { inner: score })
+    }
+
+    /// Parse from .sus string content
     #[staticmethod]
     fn from_str(content: &str) -> PyScore {
         PyScore {
             inner: content.parse().unwrap(),
         }
+    }
+
+    /// Parse from Project SEKAI custom chart JSON string, dict, or file-like object
+    #[staticmethod]
+    fn from_json(py: pyo3::Python<'_>, value: &Bound<'_, pyo3::types::PyAny>) -> PyResult<PyScore> {
+        let content = if value.is_instance_of::<PyDict>() {
+            py.import("json")?
+                .call_method1("dumps", (value,))?
+                .extract::<String>()?
+        } else {
+            read_text_or_file(value)?
+        };
+        let score = Score::parse_json(&content).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid score JSON: {e}"))
+        })?;
+        Ok(PyScore { inner: score })
+    }
+
+    /// Load from a Python dict
+    #[staticmethod]
+    fn from_dict(py: pyo3::Python<'_>, dict: &Bound<'_, pyo3::types::PyAny>) -> PyResult<PyScore> {
+        Self::from_json(py, dict)
+    }
+
+    /// Load from .sus string content, JSON string content, dict, or file-like object
+    #[staticmethod]
+    fn load(py: pyo3::Python<'_>, value: &Bound<'_, pyo3::types::PyAny>) -> PyResult<PyScore> {
+        if value.is_instance_of::<PyDict>() {
+            return Self::from_json(py, value);
+        }
+
+        let content = read_text_or_file(value)?;
+        let score = Score::parse_auto(&content).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid score JSON: {e}"))
+        })?;
+        Ok(PyScore { inner: score })
     }
 
     #[getter]
@@ -737,7 +791,7 @@ impl PyDrawing {
     }
 }
 
-/// Convenience function: parse a .sus file and generate SVG in one call
+/// Convenience function: parse a score file and generate SVG in one call
 #[pyfunction]
 #[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
 fn sus_to_svg(
@@ -766,7 +820,7 @@ fn sus_to_svg(
     Ok(drawing.svg(&mut score, lyric.as_ref()))
 }
 
-/// Convenience function: parse a .sus file and generate PNG bytes in one call
+/// Convenience function: parse a score file and generate PNG bytes in one call
 #[pyfunction]
 #[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
 fn sus_to_png<'py>(
@@ -797,7 +851,7 @@ fn sus_to_png<'py>(
     Ok(PyBytes::new(py, &bytes))
 }
 
-/// Convenience function: parse a .sus file and generate JPEG bytes in one call
+/// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
 #[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
 fn sus_to_jpg<'py>(
@@ -829,7 +883,7 @@ fn sus_to_jpg<'py>(
     Ok(PyBytes::new(py, &bytes))
 }
 
-/// Convenience function: parse a .sus file and generate JPEG bytes in one call
+/// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
 #[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
 fn sus_to_jpeg<'py>(
@@ -862,6 +916,132 @@ fn sus_to_jpeg<'py>(
     )
 }
 
+/// Convenience function: parse a score file and generate SVG in one call
+#[pyfunction]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
+fn score_to_svg(
+    score_path: &str,
+    note_host: Option<String>,
+    style_sheet: Option<String>,
+    rebase_json: Option<&str>,
+    lyric_content: Option<&str>,
+    skill: bool,
+    music_meta: Option<&Bound<'_, PyDict>>,
+    target_segment_seconds: Option<f64>,
+    generator: Option<String>,
+    note_asset_extension: Option<String>,
+) -> PyResult<String> {
+    sus_to_svg(
+        score_path,
+        note_host,
+        style_sheet,
+        rebase_json,
+        lyric_content,
+        skill,
+        music_meta,
+        target_segment_seconds,
+        generator,
+        note_asset_extension,
+    )
+}
+
+/// Convenience function: parse a score file and generate PNG bytes in one call
+#[pyfunction]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
+fn score_to_png<'py>(
+    py: Python<'py>,
+    score_path: &str,
+    note_host: Option<String>,
+    style_sheet: Option<String>,
+    rebase_json: Option<&str>,
+    lyric_content: Option<&str>,
+    skill: bool,
+    music_meta: Option<&Bound<'_, PyDict>>,
+    target_segment_seconds: Option<f64>,
+    generator: Option<String>,
+    note_asset_extension: Option<String>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    sus_to_png(
+        py,
+        score_path,
+        note_host,
+        style_sheet,
+        rebase_json,
+        lyric_content,
+        skill,
+        music_meta,
+        target_segment_seconds,
+        generator,
+        note_asset_extension,
+    )
+}
+
+/// Convenience function: parse a score file and generate JPEG bytes in one call
+#[pyfunction]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
+fn score_to_jpg<'py>(
+    py: Python<'py>,
+    score_path: &str,
+    note_host: Option<String>,
+    style_sheet: Option<String>,
+    rebase_json: Option<&str>,
+    lyric_content: Option<&str>,
+    skill: bool,
+    music_meta: Option<&Bound<'_, PyDict>>,
+    target_segment_seconds: Option<f64>,
+    generator: Option<String>,
+    note_asset_extension: Option<String>,
+    jpeg_quality: u8,
+) -> PyResult<Bound<'py, PyBytes>> {
+    sus_to_jpg(
+        py,
+        score_path,
+        note_host,
+        style_sheet,
+        rebase_json,
+        lyric_content,
+        skill,
+        music_meta,
+        target_segment_seconds,
+        generator,
+        note_asset_extension,
+        jpeg_quality,
+    )
+}
+
+/// Convenience function: parse a score file and generate JPEG bytes in one call
+#[pyfunction]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
+fn score_to_jpeg<'py>(
+    py: Python<'py>,
+    score_path: &str,
+    note_host: Option<String>,
+    style_sheet: Option<String>,
+    rebase_json: Option<&str>,
+    lyric_content: Option<&str>,
+    skill: bool,
+    music_meta: Option<&Bound<'_, PyDict>>,
+    target_segment_seconds: Option<f64>,
+    generator: Option<String>,
+    note_asset_extension: Option<String>,
+    jpeg_quality: u8,
+) -> PyResult<Bound<'py, PyBytes>> {
+    score_to_jpg(
+        py,
+        score_path,
+        note_host,
+        style_sheet,
+        rebase_json,
+        lyric_content,
+        skill,
+        music_meta,
+        target_segment_seconds,
+        generator,
+        note_asset_extension,
+        jpeg_quality,
+    )
+}
+
 /// Register all Python types and functions
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFraction>()?;
@@ -875,5 +1055,9 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sus_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(sus_to_jpg, m)?)?;
     m.add_function(wrap_pyfunction!(sus_to_jpeg, m)?)?;
+    m.add_function(wrap_pyfunction!(score_to_svg, m)?)?;
+    m.add_function(wrap_pyfunction!(score_to_png, m)?)?;
+    m.add_function(wrap_pyfunction!(score_to_jpg, m)?)?;
+    m.add_function(wrap_pyfunction!(score_to_jpeg, m)?)?;
     Ok(())
 }

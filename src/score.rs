@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io;
+use std::path::Path;
 
 use crate::fraction::Fraction;
 use crate::line::{
@@ -9,6 +11,7 @@ use crate::meta::Meta;
 use crate::notes::event::Event;
 use crate::notes::slide::SlideType;
 use crate::notes::{NO_NOTE, NoteData, NoteIdx};
+use crate::score_json::{ScoreJsonError, parse_score_json};
 
 /// The main score container. Holds all parsed notes in an arena
 /// and events in a sorted list.
@@ -35,21 +38,49 @@ impl Score {
         }
     }
 
-    /// Open and parse a .sus file
-    pub fn open(path: &str) -> std::io::Result<Score> {
+    /// Open and parse a score file. `.json` files and JSON-looking content are parsed
+    /// as Project SEKAI custom chart JSON; all other files are parsed as `.sus`.
+    pub fn open(path: &str) -> io::Result<Score> {
         let content = fs::read_to_string(path)?;
-        let mut score = Score::new();
-        let lines: Vec<Line> = content.lines().map(Line::new).collect();
-        score.init_by_lines(&lines);
-        Ok(score)
+        if path_looks_json(path) || content_looks_json(&content) {
+            return Self::parse_json(&content).map_err(invalid_json_data);
+        }
+
+        Ok(Self::parse(&content))
     }
 
-    /// Parse from string content
+    /// Open and parse a .sus file
+    pub fn open_sus(path: &str) -> io::Result<Score> {
+        let content = fs::read_to_string(path)?;
+        Ok(Self::parse(&content))
+    }
+
+    /// Open and parse Project SEKAI custom chart JSON
+    pub fn open_json(path: &str) -> io::Result<Score> {
+        let content = fs::read_to_string(path)?;
+        Self::parse_json(&content).map_err(invalid_json_data)
+    }
+
+    /// Parse from .sus string content
     pub fn parse(content: &str) -> Score {
         let mut score = Score::new();
         let lines: Vec<Line> = content.lines().map(Line::new).collect();
         score.init_by_lines(&lines);
         score
+    }
+
+    /// Parse from Project SEKAI custom chart JSON string content
+    pub fn parse_json(content: &str) -> Result<Score, ScoreJsonError> {
+        parse_score_json(content)
+    }
+
+    /// Parse score string content, auto-detecting JSON-looking content.
+    pub fn parse_auto(content: &str) -> Result<Score, ScoreJsonError> {
+        if content_looks_json(content) {
+            Self::parse_json(content)
+        } else {
+            Ok(Self::parse(content))
+        }
     }
 
     fn init_by_lines(&mut self, lines: &[Line]) {
@@ -426,4 +457,23 @@ fn events_equal(a: &Event, b: &Event) -> bool {
         && a.speed == b.speed
         && a.section == b.section
         && a.text == b.text
+}
+
+fn path_looks_json(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+}
+
+fn content_looks_json(content: &str) -> bool {
+    content
+        .trim_start()
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c, '{' | '['))
+}
+
+fn invalid_json_data(error: ScoreJsonError) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
 }

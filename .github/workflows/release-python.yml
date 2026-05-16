@@ -4,20 +4,9 @@ on:
   release:
     types: [published]
   workflow_dispatch:
-    inputs:
-      skia_image:
-        description: Build wheels with optional Skia image output support
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
-
-env:
-  # Extract version from tag (strips 'v' prefix), fallback to 0.0.0 for workflow_dispatch
-  RELEASE_VERSION: ${{ github.event_name == 'release' && github.ref_name || 'v0.0.0' }}
-  PYTHON_FEATURES: ${{ github.event_name == 'workflow_dispatch' && inputs.skia_image && 'python,skia-image' || 'python' }}
 
 jobs:
   # ──────────────────────────────────────────────
@@ -28,26 +17,34 @@ jobs:
     strategy:
       matrix:
         target: [x86_64, aarch64]
+        package:
+          - name: pjsekai-scores-rs
+            artifact: default
+            features: python
+            pyproject_features: '["python"]'
+          - name: pjsekai-scores-rs-skia-image
+            artifact: skia-image
+            features: python,skia-image
+            pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Set version from tag
-        if: github.event_name == 'release'
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "0,/^version = .*/s//version = \"${VERSION}\"/" Cargo.toml
-          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+      - name: Set Python package metadata
+        run: bash .github/scripts/configure-python-package.sh
+        env:
+          PYTHON_PACKAGE_NAME: ${{ matrix.package.name }}
+          MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features ${{ env.PYTHON_FEATURES }}
+          args: --release --out dist --find-interpreter --features ${{ matrix.package.features }}
           sccache: "true"
           manylinux: auto
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-linux-${{ matrix.target }}
+          name: wheels-${{ matrix.package.artifact }}-linux-${{ matrix.target }}
           path: dist
 
   # ──────────────────────────────────────────────
@@ -61,26 +58,34 @@ jobs:
     strategy:
       matrix:
         target: [x86_64]
+        package:
+          - name: pjsekai-scores-rs
+            artifact: default
+            features: python
+            pyproject_features: '["python"]'
+          - name: pjsekai-scores-rs-skia-image
+            artifact: skia-image
+            features: python,skia-image
+            pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Set version from tag
-        if: github.event_name == 'release'
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "0,/^version = .*/s//version = \"${VERSION}\"/" Cargo.toml
-          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+      - name: Set Python package metadata
+        run: bash .github/scripts/configure-python-package.sh
+        env:
+          PYTHON_PACKAGE_NAME: ${{ matrix.package.name }}
+          MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
       - name: Build free-threaded wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python3.13t python3.14t --features ${{ env.PYTHON_FEATURES }}
+          args: --release --out dist --interpreter python3.13t python3.14t --features ${{ matrix.package.features }}
           sccache: "true"
           manylinux: manylinux_2_28
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-linux-ft-${{ matrix.target }}
+          name: wheels-${{ matrix.package.artifact }}-linux-ft-${{ matrix.target }}
           path: dist
 
   # ──────────────────────────────────────────────
@@ -91,15 +96,23 @@ jobs:
     strategy:
       matrix:
         target: [x86_64, aarch64]
+        package:
+          - name: pjsekai-scores-rs
+            artifact: default
+            features: python
+            pyproject_features: '["python"]'
+          - name: pjsekai-scores-rs-skia-image
+            artifact: skia-image
+            features: python,skia-image
+            pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Set version from tag
-        if: github.event_name == 'release'
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i '' "1,/^version = .*/{s/^version = .*/version = \"${VERSION}\"/;}" Cargo.toml
-          sed -i '' "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+      - name: Set Python package metadata
+        run: bash .github/scripts/configure-python-package.sh
+        env:
+          PYTHON_PACKAGE_NAME: ${{ matrix.package.name }}
+          MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -116,12 +129,12 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --find-interpreter --features ${{ env.PYTHON_FEATURES }}
+          args: --release --out dist --find-interpreter --features ${{ matrix.package.features }}
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-macos-${{ matrix.target }}
+          name: wheels-${{ matrix.package.artifact }}-macos-${{ matrix.target }}
           path: dist
 
   # ──────────────────────────────────────────────
@@ -129,16 +142,26 @@ jobs:
   # ──────────────────────────────────────────────
   windows:
     runs-on: windows-latest
+    strategy:
+      matrix:
+        package:
+          - name: pjsekai-scores-rs
+            artifact: default
+            features: python
+            pyproject_features: '["python"]'
+          - name: pjsekai-scores-rs-skia-image
+            artifact: skia-image
+            features: python,skia-image
+            pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Set version from tag
-        if: github.event_name == 'release'
+      - name: Set Python package metadata
         shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "0,/^version = .*/s//version = \"${VERSION}\"/" Cargo.toml
-          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+        run: bash .github/scripts/configure-python-package.sh
+        env:
+          PYTHON_PACKAGE_NAME: ${{ matrix.package.name }}
+          MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -155,12 +178,12 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x64
-          args: --release --out dist --find-interpreter --features ${{ env.PYTHON_FEATURES }}
+          args: --release --out dist --find-interpreter --features ${{ matrix.package.features }}
           sccache: "true"
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-windows-x64
+          name: wheels-${{ matrix.package.artifact }}-windows-x64
           path: dist
 
   # ──────────────────────────────────────────────
@@ -168,15 +191,23 @@ jobs:
   # ──────────────────────────────────────────────
   sdist:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package:
+          - name: pjsekai-scores-rs
+            artifact: default
+            pyproject_features: '["python"]'
+          - name: pjsekai-scores-rs-skia-image
+            artifact: skia-image
+            pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Set version from tag
-        if: github.event_name == 'release'
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "0,/^version = .*/s//version = \"${VERSION}\"/" Cargo.toml
-          sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+      - name: Set Python package metadata
+        run: bash .github/scripts/configure-python-package.sh
+        env:
+          PYTHON_PACKAGE_NAME: ${{ matrix.package.name }}
+          MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
@@ -185,7 +216,7 @@ jobs:
       - name: Upload sdist
         uses: actions/upload-artifact@v7
         with:
-          name: wheels-sdist
+          name: wheels-sdist-${{ matrix.package.artifact }}
           path: dist
 
   # ──────────────────────────────────────────────
@@ -211,4 +242,4 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
       - name: Publish to PyPI
-        run: uv publish dist/*
+        run: uv publish --trusted-publishing always dist/*

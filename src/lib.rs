@@ -6,6 +6,7 @@ pub mod meta;
 pub mod notes;
 pub mod rebase;
 pub mod score;
+pub mod score_json;
 
 #[cfg(feature = "skia-image")]
 pub mod skia_direct;
@@ -22,6 +23,7 @@ pub use notes::tap::{Tap, TapType};
 pub use notes::{NoteData, NoteIdx};
 pub use rebase::Rebase;
 pub use score::Score;
+pub use score_json::ScoreJsonError;
 
 #[cfg(feature = "skia-image")]
 pub use skia_direct::{

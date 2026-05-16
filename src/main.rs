@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use pjsekai_scores_rs::{Drawing, Lyric, MusicMeta, Rebase, Score};
 use serde_json::Value;
 use std::fs;
@@ -7,11 +7,15 @@ use std::path::Path;
 #[derive(Parser, Debug)]
 #[command(
     name = "pjsekai-scores",
-    about = "Project SEKAI score (.sus) to SVG/PNG/JPEG renderer"
+    about = "Project SEKAI score (.sus/custom JSON) to SVG/PNG/JPEG renderer"
 )]
 struct Args {
-    /// The .sus score file
+    /// The score file (.sus or Project SEKAI custom chart JSON)
     score: String,
+
+    /// Input score format
+    #[arg(long, default_value = "auto")]
+    score_format: ScoreFormat,
 
     /// Customized BPM, beats and sections (JSON)
     #[arg(long)]
@@ -88,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = resolve_output_path(&args);
 
     // Parse score
-    let mut score = Score::open(&args.score)?;
+    let mut score = open_score(&args)?;
     apply_cli_meta(&mut score, &args);
 
     // Apply rebase if provided
@@ -221,6 +225,21 @@ enum OutputFormat {
     Svg,
     Png,
     Jpeg,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ScoreFormat {
+    Auto,
+    Sus,
+    Json,
+}
+
+fn open_score(args: &Args) -> Result<Score, Box<dyn std::error::Error>> {
+    match args.score_format {
+        ScoreFormat::Auto => Ok(Score::open(&args.score)?),
+        ScoreFormat::Sus => Ok(Score::open_sus(&args.score)?),
+        ScoreFormat::Json => Ok(Score::open_json(&args.score)?),
+    }
 }
 
 fn output_format(output: &str) -> Result<OutputFormat, Box<dyn std::error::Error>> {
