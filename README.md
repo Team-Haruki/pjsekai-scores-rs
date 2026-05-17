@@ -10,6 +10,7 @@ Project SEKAI score (`.sus`) parser, SVG chart renderer, and direct Skia image r
 - Parses `.sus` score files and Project SEKAI custom chart JSON
 - Generates SVG chart images with full note rendering (Tap / Directional / Slide)
 - Generates PNG/JPEG chart images directly with Skia, without SVG rasterization
+- Honors CSS `font-family` in Skia image output, with custom font files/directories for CJK and JP fonts
 - BPM rebase support (custom timing via JSON)
 - Lyric overlay support
 - Skill/Fever cover overlay support
@@ -50,6 +51,8 @@ Options:
                                  [default: https://asset3.pjsekai.moe/live/note/custom01]
       --note-asset-extension <EXTENSION>
                                  File extension for note asset files [default: png]
+      --font-path <FONT_PATH>    Font file path to load for Skia image output; may be repeated
+      --font-dir <FONT_DIR>      Directory containing .ttf/.otf/.ttc fonts for Skia image output; may be repeated
       --title <TITLE>            Music title shown in the chart footer
       --artist <ARTIST>          Music artist shown in the chart footer
       --difficulty <DIFFICULTY>  Difficulty shown in the chart footer
@@ -62,6 +65,7 @@ Options:
                                  Approximate seconds per chart column
       --jpeg-quality <JPEG_QUALITY>
                                  JPEG quality for .jpg/.jpeg output (0-100) [default: 90]
+      --perf                     Print render/write timing statistics
       --generator <GENERATOR>    Generator name shown in the SVG subtitle
                                  [default: HarukiBot NEO]
   -o, --output <OUTPUT>          Output file path (.svg, .png, .jpg, or .jpeg)
@@ -88,6 +92,18 @@ pjsekai-scores-rs master.sus --css dark.css --note-host /path/to/notes -o master
 
 # JPEG via direct Skia rendering. JPEG quality defaults to 90.
 pjsekai-scores-rs master.sus --css dark.css --note-host /path/to/notes --jpeg-quality 92 -o master.jpg
+
+# Skia output with CSS-declared fonts. Build with --features skia-image.
+pjsekai-scores-rs master.sus \
+  --css black.css \
+  --note-host /path/to/chart_asset/notes \
+  --font-path /path/to/SourceHanSansSC-Regular.otf \
+  --font-path /path/to/SourceHanSansSC-Bold.otf \
+  --font-path /path/to/FOT-RodinNTLGPro-DB.otf \
+  -o master.png
+
+# A font directory can be used for ad-hoc runs; it is scanned recursively.
+pjsekai-scores-rs master.sus --font-dir /path/to/fonts -o master.png --perf
 
 # With Haruki/Saika chart request metadata
 pjsekai-scores-rs master.sus \
@@ -327,6 +343,12 @@ drawing = scores.Drawing(
     target_segment_seconds=8.0,
     generator="MyBot v1.0",
     note_asset_extension="png",
+    font_paths=[
+        "/path/to/SourceHanSansSC-Regular.otf",
+        "/path/to/SourceHanSansSC-Bold.otf",
+        "/path/to/FOT-RodinNTLGPro-DB.otf",
+    ],
+    font_dirs=None,
 )
 
 drawing.note_size = 18
@@ -339,6 +361,19 @@ svg_string = drawing.svg(score, lyric=lyric)
 png_bytes = drawing.png(score)
 jpg_bytes = drawing.jpg(score, jpeg_quality=90)
 jpeg_bytes = drawing.jpeg(score, jpeg_quality=90)
+```
+
+`font_paths` and `font_dirs` only affect direct Skia PNG/JPEG rendering. SVG output keeps CSS as text and lets the viewer resolve fonts. For services, prefer explicit `font_paths` over broad `font_dirs`: directory inputs are scanned recursively before rendering, while loaded custom typefaces are cached per process by font path, modified time, and file size.
+
+Skia image output parses CSS `font-family` declarations from the built-in theme plus `style_sheet`. It can match system fonts or custom fonts loaded from `font_paths` / `font_dirs`, including family names such as `Source Han Sans SC` and `FOT-RodinNTLG Pro DB`. When CJK glyphs are present, the renderer only uses a candidate typeface if it covers the required glyphs, then falls back to another matching custom/system font.
+
+Custom font paths can also be changed after construction:
+
+```python
+drawing.set_font_paths(["/path/to/SourceHanSansSC-Regular.otf"])
+drawing.add_font_path("/path/to/SourceHanSansSC-Bold.otf")
+drawing.set_font_dirs(["/path/to/fonts"])
+drawing.add_font_dir("/path/to/more-fonts")
 ```
 
 #### Convenience functions
@@ -364,6 +399,10 @@ png = scores.score_to_png(
     note_host="/path/to/notes",
     style_sheet="",
     target_segment_seconds=8.0,
+    font_paths=[
+        "/path/to/SourceHanSansSC-Regular.otf",
+        "/path/to/FOT-RodinNTLGPro-DB.otf",
+    ],
 )
 
 jpg = scores.score_to_jpg(
@@ -470,6 +509,8 @@ pjsekai-scores-rs/
 - The `python` feature gate enables PyO3. Without it, the crate builds as a pure Rust library + CLI binary with no Python dependency.
 - `Score::open()` and `Score::parse_auto()` auto-detect JSON-looking custom chart input; use `Score::open_sus()` / `Score::parse()` or `Score::open_json()` / `Score::parse_json()` to force a format.
 - The `skia-image` feature enables direct PNG/JPEG output. Python wheels omit it by default; build from source with `--features python,skia-image` when image bytes are needed.
+- Skia image output parses CSS colors, font sizes, font weights, and `font-family`. Use `font_paths` / `font_dirs` or CLI `--font-path` / `--font-dir` when deployment fonts should not depend on the host system.
+- `--perf` reports render, layout, setup, draw, encode, copy, write, and total timings. PNG encoding is lossless and can be much slower than JPEG on large charts.
 - All `#[pyclass]` types are `Send + Sync` (no `Rc`/`RefCell`), satisfying Python 3.13t / 3.14t free-threaded requirements.
 - CSS is embedded at compile time via `include_str!` — no runtime file lookup required.
 - The `generate-import-lib` PyO3 feature is enabled so the Windows wheel can be cross-compiled without a local Windows Python installation.

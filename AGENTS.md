@@ -4,7 +4,7 @@ Guidance for AI coding agents working on this codebase.
 
 ## What this project is
 
-A Rust rewrite of [pjsekai/scores](https://gitlab.com/pjsekai/scores) — a `.sus` format score parser and SVG chart renderer for Project SEKAI. It ships as both a **Rust crate** and a **Python extension wheel** (PyO3/maturin).
+A Rust rewrite of [pjsekai/scores](https://gitlab.com/pjsekai/scores) — a `.sus` / Project SEKAI custom chart parser, SVG chart renderer, and direct Skia PNG/JPEG renderer. It ships as a **Rust crate**, **CLI**, and **Python extension wheel** (PyO3/maturin).
 
 The original Python implementation lives at `../scores/` and is the reference for correctness. Do not modify it.
 
@@ -17,6 +17,8 @@ The original Python implementation lives at `../scores/` and is the reference fo
 cargo build --release
 cargo build --release --features skia-image
 cargo check
+cargo check --features 'python skia-image'
+cargo test --features skia-image
 
 # Python wheel (current platform, active venv)
 maturin build --release
@@ -52,6 +54,7 @@ src/
 ├── lyric.rs        Lyric/Word parser
 ├── rebase.rs       BPM/timing rebase transformation
 ├── drawing.rs      SVG renderer — direct String building, ~750 lines
+├── skia_direct.rs  Direct Skia PNG/JPEG renderer + CSS/font handling
 ├── python.rs       All PyO3 bindings (PyScore, PyDrawing, PyRebase, PyLyric, PyEvent)
 ├── notes.rs        NoteData enum, arena index pattern (NoteIdx = usize)
 └── notes/
@@ -94,6 +97,15 @@ Accessed directly by `rebase.rs` to pre-compute bar→time mappings without borr
 ### Drawing.svg() borrow order
 `self.build_skill_covers(score)` takes `&mut self`. The `let cfg = &self.config` binding must come **after** this mutable call, not before. Violating this causes E0502.
 
+### Skia custom fonts and CSS `font-family`
+Skia image output honors CSS `font-family`, `font-weight`, and `font-size` parsed from the built-in theme plus runtime `style_sheet`. The SVG renderer only emits CSS; custom font loading is for direct PNG/JPEG rendering.
+
+Custom fonts enter through `DrawingConfig.font_paths` / `font_dirs`, CLI `--font-path` / `--font-dir`, and Python `Drawing(..., font_paths=..., font_dirs=...)` plus setter methods. `font_dirs` are scanned recursively for `.ttf`, `.otf`, and `.ttc`; prefer explicit `font_paths` in services to avoid scanning large asset roots on hot paths.
+
+`skia_direct.rs` registers custom typefaces by localized family name, Skia family name, and PostScript name, all normalized for lookup. This lets CSS names such as `FOT-RodinNTLG Pro DB` and `Source Han Sans SC` match bundled fonts. When CJK text is present, a candidate typeface must cover the required glyphs before it is selected.
+
+Custom font data is cached per process in `CUSTOM_FONT_CACHE`, keyed by sorted font path, modified time, and file size. Keep that key stable when changing font loading; stale font cache bugs are harder to diagnose than a small setup cost.
+
 ### Raw strings with `href="#`
 The literal `href="#` contains `"#` which prematurely closes `r#"..."#` raw strings. Use `r##"..."##` for any format string containing this pattern.
 
@@ -119,6 +131,7 @@ The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build
 | `Lyric.load(file_obj)` | `Lyric.load(string)` |
 | `score.events` (attribute) | `score.events()` (method) |
 | *(no generator param)* | `Drawing(generator="…")` / `sus_to_svg(generator="…")` |
+| system fonts only for raster text | `font_paths` / `font_dirs` for Skia PNG/JPEG |
 
 ---
 
@@ -130,6 +143,17 @@ The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build
 - **Do not use `r#"..."#`** for strings that embed `href="#` — use `r##"..."##`.
 - **Do not move `let cfg = &self.config`** before the `build_skill_covers()` call in `drawing.rs`.
 - **Do not rename `notes.rs` back to `notes/mod.rs`** — the module root lives at `src/notes.rs`; submodules stay in `src/notes/`.
+- **Do not rely on host-installed fonts for deployed Skia output** — expose/pass font files or directories instead.
+- **Do not point `font_dirs` at broad asset roots in performance-sensitive services** unless that scan cost is acceptable. Prefer known `font_paths`.
+
+---
+
+## Release and verification notes
+
+- Release commits and release tags must be GPG-signed. Verify with `git log -1 --show-signature` and `git tag -v vX.Y.Z`.
+- A GitHub Release/tag triggers three release workflows: Crate, CLI, and Python. Check all three, especially the `pjsekai-scores-rs-skia-image` Python publish job.
+- For Skia/font/API changes, run `cargo check --features 'python skia-image'` and `cargo test --features skia-image` before release.
+- When changing CLI/Python options, update `README.md`, `AGENTS.md`, and `CLAUDE.md` in the same docs pass.
 
 ---
 
@@ -154,7 +178,8 @@ Rules:
 - Imperative mood (`Add ...`, not `Added ...`).
 - No trailing period.
 - Keep subject ≤ ~70 chars.
-- **Agent commits must include a `Co-Authored-By` trailer** identifying the agent.
+- **Agent commits must include a standard `Co-authored-by:` trailer** identifying the agent.
+- Prefer signed commits (`git commit -S`) and signed release tags (`git tag -s`).
 
 Examples:
 
@@ -163,4 +188,6 @@ Examples:
 [Fix] Move user_snapshot config under pjsk_render
 [Chore] Rename config file to haruki-cloud.yaml
 [Docs] Update known-bugs.md with snapshot fix
+
+Co-authored-by: Codex <noreply@openai.com>
 ```

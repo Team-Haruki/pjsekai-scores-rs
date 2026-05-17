@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Rust rewrite of [pjsekai/scores](https://gitlab.com/pjsekai/scores) — a `.sus` format score parser and SVG chart renderer for Project SEKAI. Ships as both a Rust crate/CLI and a Python extension wheel (via PyO3/maturin). The original Python implementation at `../scores/` is the reference for correctness — do not modify it.
+A Rust rewrite of [pjsekai/scores](https://gitlab.com/pjsekai/scores) — a `.sus` / Project SEKAI custom chart parser, SVG chart renderer, and direct Skia PNG/JPEG renderer. Ships as a Rust crate/CLI and a Python extension wheel (via PyO3/maturin). The original Python implementation at `../scores/` is the reference for correctness — do not modify it.
 
 ## Build and test commands
 
@@ -15,6 +15,7 @@ cargo check                                   # Type check (pure Rust, no PyO3)
 cargo check --features python                 # Type check with PyO3 bindings
 cargo check --features 'python skia-image'    # Type check optional image bindings
 cargo test                                    # Run all tests
+cargo test --features skia-image              # Run tests including Skia/CSS/font code
 cargo test <test_name>                        # Run a single test
 cargo clippy -- -D warnings                   # Lint (CI requires clean)
 cargo fmt --all --check                       # Format check (CI requires clean)
@@ -43,8 +44,15 @@ Notes live in `Score::notes: Vec<NoteData>`. Cross-references (slide head/tail/n
 ### SVG rendering (`drawing.rs`)
 Direct `String` building via `std::fmt::Write` — no DOM library. CSS themes are embedded at compile time with `include_str!`. Borrow order matters: `self.build_skill_covers(score)` (`&mut self`) must be called **before** taking `&self.config`.
 
+### Skia image rendering (`skia_direct.rs`)
+Direct PNG/JPEG output is behind the `skia-image` feature. It parses CSS colors, `font-size`, `font-weight`, and `font-family` from the built-in theme plus runtime `style_sheet`. CLI `--font-path` / `--font-dir` and Python `font_paths` / `font_dirs` load custom `.ttf`, `.otf`, and `.ttc` fonts for Skia output only; SVG output still leaves font resolution to the viewer.
+
+Prefer explicit font files in services. `font_dirs` are recursive and can be expensive when pointed at broad asset roots. Custom typefaces are cached per process by sorted font path, modified time, and file size, so repeated Python API renders should not reread the same CJK/JP fonts.
+
+CSS family lookup uses localized family names, Skia family names, and PostScript names after normalization. This is why names like `Source Han Sans SC` and `FOT-RodinNTLG Pro DB` can work when those font files are passed in. For CJK text, candidate typefaces must cover the required glyphs before selection.
+
 ### `python.rs` is a thin binding layer
-All business logic lives in the core modules. `python.rs` only wraps types for PyO3.
+All business logic lives in the core modules. `python.rs` only wraps types for PyO3. Keep `font_paths` / `font_dirs` available on `Drawing`, `score_to_svg/png/jpg/jpeg`, and the backward-compatible `sus_to_*` helpers when adjusting rendering arguments.
 
 ### `pub init_notes()` / `pub init_events()`
 These must remain `pub` — called by `rebase.rs` after rebuilding note/event vectors.
@@ -57,4 +65,6 @@ Use `r##"..."##` (not `r#"..."#`) for format strings containing `href="#` — th
 
 ## Git commit format
 
-All commits **must** follow `[Type] Short description` where Type is one of `[Feat]`, `[Fix]`, `[Chore]`, `[Docs]`. Description starts with a capital letter, imperative mood, no trailing period, ≤ ~70 chars. Agent commits must include a `Co-Authored-By` trailer identifying the agent.
+All commits **must** follow `[Type] Short description` where Type is one of `[Feat]`, `[Fix]`, `[Chore]`, `[Docs]`. Description starts with a capital letter, imperative mood, no trailing period, ≤ ~70 chars. Agent commits must include a standard `Co-authored-by:` trailer identifying the agent. Prefer signed commits (`git commit -S`) and signed release tags (`git tag -s`); verify release signatures with `git log -1 --show-signature` and `git tag -v vX.Y.Z`.
+
+When changing CLI/Python rendering options, update `README.md`, `AGENTS.md`, and `CLAUDE.md` together.
