@@ -3,6 +3,7 @@ use pjsekai_scores_rs::{Drawing, Lyric, MusicMeta, Rebase, Score};
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -77,6 +78,10 @@ struct Args {
     #[arg(long, default_value_t = 90, value_parser = parse_jpeg_quality)]
     jpeg_quality: u8,
 
+    /// Print render/write timing statistics
+    #[arg(long)]
+    perf: bool,
+
     /// Output file path (.svg, .png, .jpg, or .jpeg)
     #[arg(short, long)]
     output: Option<String>,
@@ -133,31 +138,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     drawing.set_note_asset_extension(args.note_asset_extension);
 
-    match output_format(&output)? {
-        OutputFormat::Svg => {
-            let svg = drawing.svg(&mut score, lyric.as_ref());
-            fs::write(&output, svg)?;
-        }
-        OutputFormat::Png => {
-            write_skia_image_output(
-                &output,
-                OutputFormat::Png,
-                args.jpeg_quality,
-                &mut drawing,
-                &mut score,
-                lyric.as_ref(),
-            )?;
-        }
-        OutputFormat::Jpeg => {
-            write_skia_image_output(
-                &output,
-                OutputFormat::Jpeg,
-                args.jpeg_quality,
-                &mut drawing,
-                &mut score,
-                lyric.as_ref(),
-            )?;
-        }
+    let stats = match output_format(&output)? {
+        OutputFormat::Svg => write_svg_output(&output, &mut drawing, &mut score, lyric.as_ref())?,
+        OutputFormat::Png => write_skia_image_output(
+            &output,
+            OutputFormat::Png,
+            args.jpeg_quality,
+            &mut drawing,
+            &mut score,
+            lyric.as_ref(),
+        )?,
+        OutputFormat::Jpeg => write_skia_image_output(
+            &output,
+            OutputFormat::Jpeg,
+            args.jpeg_quality,
+            &mut drawing,
+            &mut score,
+            lyric.as_ref(),
+        )?,
+    };
+    if args.perf {
+        print_output_stats(&stats);
     }
     eprintln!("Written to {output}");
 
@@ -185,6 +186,28 @@ fn resolve_output_path(args: &Args) -> String {
     }
 }
 
+fn write_svg_output(
+    output: &str,
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+) -> Result<OutputStats, Box<dyn std::error::Error>> {
+    let total_started = Instant::now();
+    let render_started = Instant::now();
+    let svg = drawing.svg(score, lyric);
+    let render = render_started.elapsed();
+    let write_started = Instant::now();
+    fs::write(output, svg)?;
+    let write = write_started.elapsed();
+    Ok(OutputStats {
+        render,
+        write,
+        total: total_started.elapsed(),
+        #[cfg(feature = "skia-image")]
+        skia: None,
+    })
+}
+
 #[cfg(feature = "skia-image")]
 fn write_skia_image_output(
     output: &str,
@@ -193,9 +216,10 @@ fn write_skia_image_output(
     drawing: &mut Drawing,
     score: &mut Score,
     lyric: Option<&Lyric>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use pjsekai_scores_rs::{SkiaImageFormat, score_to_skia_image};
+) -> Result<OutputStats, Box<dyn std::error::Error>> {
+    use pjsekai_scores_rs::{SkiaImageFormat, score_to_skia_image_with_stats};
 
+    let total_started = Instant::now();
     let skia_format = match output_format {
         OutputFormat::Png => SkiaImageFormat::Png,
         OutputFormat::Jpeg => SkiaImageFormat::Jpeg {
@@ -203,9 +227,16 @@ fn write_skia_image_output(
         },
         OutputFormat::Svg => unreachable!("SVG output does not use Skia"),
     };
-    let bytes = score_to_skia_image(drawing, score, lyric, skia_format)?;
-    fs::write(output, bytes)?;
-    Ok(())
+    let image = score_to_skia_image_with_stats(drawing, score, lyric, skia_format)?;
+    let write_started = Instant::now();
+    fs::write(output, image.bytes)?;
+    let write = write_started.elapsed();
+    Ok(OutputStats {
+        render: image.stats.total,
+        write,
+        total: total_started.elapsed(),
+        skia: Some(image.stats),
+    })
 }
 
 #[cfg(not(feature = "skia-image"))]
@@ -216,8 +247,52 @@ fn write_skia_image_output(
     _drawing: &mut Drawing,
     _score: &mut Score,
     _lyric: Option<&Lyric>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<OutputStats, Box<dyn std::error::Error>> {
     Err("PNG/JPEG output requires building with `--features skia-image`".into())
+}
+
+struct OutputStats {
+    render: Duration,
+    write: Duration,
+    total: Duration,
+    #[cfg(feature = "skia-image")]
+    skia: Option<pjsekai_scores_rs::SkiaRenderStats>,
+}
+
+fn print_output_stats(stats: &OutputStats) {
+    #[cfg(feature = "skia-image")]
+    if let Some(skia) = stats.skia {
+        eprintln!(
+            "Timing: render {} (layout {}, setup {}, draw {}, encode {}, copy {}), write {}, total {}",
+            format_duration(stats.render),
+            format_duration(skia.layout),
+            format_duration(skia.setup),
+            format_duration(skia.draw),
+            format_duration(skia.encode),
+            format_duration(skia.copy),
+            format_duration(stats.write),
+            format_duration(stats.total),
+        );
+        return;
+    }
+
+    eprintln!(
+        "Timing: render {}, write {}, total {}",
+        format_duration(stats.render),
+        format_duration(stats.write),
+        format_duration(stats.total),
+    );
+}
+
+fn format_duration(duration: Duration) -> String {
+    let secs = duration.as_secs_f64();
+    if secs >= 1.0 {
+        format!("{secs:.3}s")
+    } else if duration.as_micros() >= 1_000 {
+        format!("{:.3}ms", secs * 1_000.0)
+    } else {
+        format!("{:.3}us", secs * 1_000_000.0)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -311,4 +386,25 @@ fn parse_music_meta(value: &str) -> Result<MusicMeta, Box<dyn std::error::Error>
         skill_score_solo: get_f64_vec("skill_score_solo"),
         skill_score_multi: get_f64_vec("skill_score_multi"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_duration;
+    use std::time::Duration;
+
+    #[test]
+    fn formats_short_durations_in_microseconds() {
+        assert_eq!(format_duration(Duration::from_nanos(500)), "0.500us");
+    }
+
+    #[test]
+    fn formats_medium_durations_in_milliseconds() {
+        assert_eq!(format_duration(Duration::from_micros(1_500)), "1.500ms");
+    }
+
+    #[test]
+    fn formats_long_durations_in_seconds() {
+        assert_eq!(format_duration(Duration::from_millis(1_250)), "1.250s");
+    }
 }

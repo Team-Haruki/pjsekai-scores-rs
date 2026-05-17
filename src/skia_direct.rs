@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use skia_safe::{
     Color, Data, EncodedImageFormat, FilterMode, Font, FontMgr, FontStyle, Image, Paint,
@@ -23,6 +25,7 @@ type BezierPoints = [(f64, f64); 4];
 pub enum SkiaDirectError {
     InvalidSize,
     Surface,
+    RenderWorker,
     Io {
         path: PathBuf,
         source: std::io::Error,
@@ -37,11 +40,28 @@ pub enum SkiaImageFormat {
     Jpeg { quality: u8 },
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SkiaRenderStats {
+    pub layout: Duration,
+    pub setup: Duration,
+    pub draw: Duration,
+    pub encode: Duration,
+    pub copy: Duration,
+    pub total: Duration,
+}
+
+#[derive(Debug)]
+pub struct SkiaImageOutput {
+    pub bytes: Vec<u8>,
+    pub stats: SkiaRenderStats,
+}
+
 impl fmt::Display for SkiaDirectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SkiaDirectError::InvalidSize => f.write_str("chart has an invalid raster size"),
             SkiaDirectError::Surface => f.write_str("failed to create Skia raster surface"),
+            SkiaDirectError::RenderWorker => f.write_str("Skia segment render worker panicked"),
             SkiaDirectError::Io { path, source } => {
                 write!(f, "failed to read image asset {}: {source}", path.display())
             }
@@ -85,33 +105,64 @@ pub fn score_to_skia_image(
     lyric: Option<&Lyric>,
     format: SkiaImageFormat,
 ) -> Result<Vec<u8>, SkiaDirectError> {
+    Ok(score_to_skia_image_with_stats(drawing, score, lyric, format)?.bytes)
+}
+
+pub fn score_to_skia_image_with_stats(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+    format: SkiaImageFormat,
+) -> Result<SkiaImageOutput, SkiaDirectError> {
+    let total_started = Instant::now();
     if drawing.skill {
         drawing.build_skill_covers(score);
     }
 
+    let layout_started = Instant::now();
     let layout = Layout::new(&drawing.config, score);
+    let layout_duration = layout_started.elapsed();
     let width = round_even(layout.final_width) as i32;
     let height = round_even(layout.final_height) as i32;
     if width <= 0 || height <= 0 {
         return Err(SkiaDirectError::InvalidSize);
     }
 
+    let setup_started = Instant::now();
     let mut surface =
         surfaces::raster_n32_premul((width, height)).ok_or(SkiaDirectError::Surface)?;
     let styles = CssStyles::parse(&drawing.style_sheet);
     let renderer = DirectRenderer::new(drawing, styles);
+    let setup_duration = setup_started.elapsed();
+    let draw_started = Instant::now();
     renderer.draw_page(surface.canvas(), score, lyric, &layout)?;
+    let draw_duration = draw_started.elapsed();
 
     let image = surface.image_snapshot();
     let (encoded_format, quality) = match format {
         SkiaImageFormat::Png => (EncodedImageFormat::PNG, 100),
         SkiaImageFormat::Jpeg { quality } => (EncodedImageFormat::JPEG, quality.min(100) as u32),
     };
+    let encode_started = Instant::now();
     #[allow(deprecated)]
     let data = image
         .encode_to_data_with_quality(encoded_format, quality)
         .ok_or(SkiaDirectError::Encode)?;
-    Ok(data.as_bytes().to_vec())
+    let encode_duration = encode_started.elapsed();
+    let copy_started = Instant::now();
+    let bytes = data.as_bytes().to_vec();
+    let copy_duration = copy_started.elapsed();
+    Ok(SkiaImageOutput {
+        bytes,
+        stats: SkiaRenderStats {
+            layout: layout_duration,
+            setup: setup_duration,
+            draw: draw_duration,
+            encode: encode_duration,
+            copy: copy_duration,
+            total: total_started.elapsed(),
+        },
+    })
 }
 
 struct Layout {
@@ -209,6 +260,7 @@ struct DirectRenderer<'a> {
     styles: CssStyles,
     font_mgr: FontMgr,
     note_assets: NoteAssets,
+    font_cache: Mutex<HashMap<FontKey, Font>>,
 }
 
 impl<'a> DirectRenderer<'a> {
@@ -219,6 +271,7 @@ impl<'a> DirectRenderer<'a> {
             styles,
             font_mgr: FontMgr::default(),
             note_assets,
+            font_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -322,28 +375,158 @@ impl<'a> DirectRenderer<'a> {
             TextAnchor::Start,
         );
 
+        let notes_snapshot = score.notes.clone();
+        let render_index = RenderIndex::new(&score.active_notes, &notes_snapshot);
         let mut x_offset = 0.0;
-        for segment in &layout.segments {
-            let y_offset = layout.max_height - segment.height + cfg.time_padding as f64;
-            canvas.save();
-            canvas.clip_rect(
-                Rect::from_xywh(
-                    as_f32(x_offset + cfg.lane_padding as f64),
-                    as_f32(y_offset),
-                    as_f32(segment.width),
-                    as_f32(segment.height),
-                ),
-                None,
-                Some(true),
-            );
-            canvas.translate((as_f32(x_offset + cfg.lane_padding as f64), as_f32(y_offset)));
-            self.draw_segment(canvas, score, lyric, segment);
-            canvas.restore();
-            x_offset += segment.width;
+        if should_render_segments_parallel(layout) {
+            let segment_rasters = self.render_segment_rasters(
+                &*score,
+                lyric,
+                layout,
+                &notes_snapshot,
+                &render_index,
+            )?;
+            for (segment, raster) in layout.segments.iter().zip(&segment_rasters) {
+                let y_offset = layout.max_height - segment.height + cfg.time_padding as f64;
+                draw_segment_image(
+                    canvas,
+                    raster,
+                    x_offset + cfg.lane_padding as f64,
+                    y_offset,
+                    segment.width,
+                    segment.height,
+                )?;
+                x_offset += segment.width;
+            }
+        } else {
+            for segment in &layout.segments {
+                let y_offset = layout.max_height - segment.height + cfg.time_padding as f64;
+                canvas.save();
+                canvas.clip_rect(
+                    Rect::from_xywh(
+                        as_f32(x_offset + cfg.lane_padding as f64),
+                        as_f32(y_offset),
+                        as_f32(segment.width),
+                        as_f32(segment.height),
+                    ),
+                    None,
+                    Some(true),
+                );
+                canvas.translate((as_f32(x_offset + cfg.lane_padding as f64), as_f32(y_offset)));
+                self.draw_segment(
+                    canvas,
+                    score,
+                    lyric,
+                    segment,
+                    &notes_snapshot,
+                    &render_index,
+                );
+                canvas.restore();
+                x_offset += segment.width;
+            }
         }
 
         debug_assert!((x_offset - layout.total_width).abs() < 0.001);
         Ok(())
+    }
+
+    fn render_segment_rasters(
+        &self,
+        score: &Score,
+        lyric: Option<&Lyric>,
+        layout: &Layout,
+        notes_snapshot: &[NoteData],
+        render_index: &RenderIndex,
+    ) -> Result<Vec<SegmentRaster>, SkiaDirectError> {
+        if layout.segments.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        std::thread::scope(|scope| {
+            let drawing = self.drawing;
+            let worker_count = std::thread::available_parallelism()
+                .map(|threads| threads.get())
+                .unwrap_or(1)
+                .min(layout.segments.len());
+            let chunk_size = layout.segments.len().div_ceil(worker_count);
+            let handles: Vec<_> = layout
+                .segments
+                .chunks(chunk_size)
+                .enumerate()
+                .map(|(chunk_idx, segments)| {
+                    let start_idx = chunk_idx * chunk_size;
+                    let styles = self.styles.clone();
+                    let note_assets = self.note_assets.clone();
+                    scope.spawn(move || {
+                        let renderer = DirectRenderer {
+                            drawing,
+                            styles,
+                            font_mgr: FontMgr::default(),
+                            note_assets,
+                            font_cache: Mutex::new(HashMap::new()),
+                        };
+                        let mut rasters = Vec::with_capacity(segments.len());
+                        for (offset, segment) in segments.iter().enumerate() {
+                            rasters.push((
+                                start_idx + offset,
+                                renderer.render_segment_raster(
+                                    score,
+                                    lyric,
+                                    segment,
+                                    notes_snapshot,
+                                    render_index,
+                                )?,
+                            ));
+                        }
+                        Ok::<_, SkiaDirectError>(rasters)
+                    })
+                })
+                .collect();
+            let mut rasters = Vec::new();
+            rasters.resize_with(layout.segments.len(), || None);
+            for handle in handles {
+                for (idx, raster) in handle.join().map_err(|_| SkiaDirectError::RenderWorker)?? {
+                    rasters[idx] = Some(raster);
+                }
+            }
+            rasters
+                .into_iter()
+                .map(|raster| raster.ok_or(SkiaDirectError::Surface))
+                .collect()
+        })
+    }
+
+    fn render_segment_raster(
+        &self,
+        score: &Score,
+        lyric: Option<&Lyric>,
+        segment: &Segment,
+        notes_snapshot: &[NoteData],
+        render_index: &RenderIndex,
+    ) -> Result<SegmentRaster, SkiaDirectError> {
+        let width = round_even(segment.width) as i32;
+        let height = round_even(segment.height) as i32;
+        if width <= 0 || height <= 0 {
+            return Err(SkiaDirectError::InvalidSize);
+        }
+
+        let mut segment_score = segment_score(score);
+        let mut surface =
+            surfaces::raster_n32_premul((width, height)).ok_or(SkiaDirectError::Surface)?;
+        self.draw_segment(
+            surface.canvas(),
+            &mut segment_score,
+            lyric,
+            segment,
+            notes_snapshot,
+            render_index,
+        );
+
+        Ok(SegmentRaster {
+            width,
+            height,
+            image: surface.image_snapshot(),
+        })
     }
 
     fn draw_segment(
@@ -352,6 +535,8 @@ impl<'a> DirectRenderer<'a> {
         score: &mut Score,
         lyric: Option<&Lyric>,
         segment: &Segment,
+        notes_snapshot: &[NoteData],
+        render_index: &RenderIndex,
     ) {
         let cfg = &self.drawing.config;
         let bar_start_f = Fraction::from_integer(segment.start as i64);
@@ -500,14 +685,14 @@ impl<'a> DirectRenderer<'a> {
             self.draw_lyrics(canvas, score, lyric, bar_start_f, bar_stop_f);
         }
 
-        let layers = self.collect_note_layers(score, bar_start_f, bar_stop_f);
-        let notes_snapshot = score.notes.clone();
+        let layers =
+            self.collect_note_layers(render_index, notes_snapshot, bar_start_f, bar_stop_f);
         let mut amongs = Vec::new();
         for &idx in &layers.slide_paths {
-            self.draw_slide_path(canvas, score, &notes_snapshot, idx, bar_stop_f, &mut amongs);
+            self.draw_slide_path(canvas, score, notes_snapshot, idx, bar_stop_f, &mut amongs);
         }
         for &idx in &layers.notes {
-            self.draw_note(canvas, score, &notes_snapshot, idx, bar_stop_f);
+            self.draw_note(canvas, score, notes_snapshot, idx, bar_stop_f);
         }
         for among in amongs {
             self.draw_among(
@@ -520,10 +705,10 @@ impl<'a> DirectRenderer<'a> {
             );
         }
         for &idx in layers.flicks.iter().rev() {
-            self.draw_flick(canvas, score, &notes_snapshot, idx, bar_stop_f);
+            self.draw_flick(canvas, score, notes_snapshot, idx, bar_stop_f);
         }
         for tick in layers.ticks {
-            self.draw_tick(canvas, score, &notes_snapshot, tick, bar_stop_f);
+            self.draw_tick(canvas, score, notes_snapshot, tick, bar_stop_f);
         }
         for speed in speed_lines {
             let x1 = cfg.lane_padding as f64;
@@ -562,12 +747,20 @@ impl<'a> DirectRenderer<'a> {
         let cfg = &self.drawing.config;
         let bar_start_f = Fraction::from_integer(bar_start as i64);
         let bar_stop_f = Fraction::from_integer(bar_stop as i64);
+        let visible_from = bar_start_f - Fraction::from_integer(1);
+        let visible_to = bar_stop_f + Fraction::from_integer(1);
         let mut speed_lines = Vec::new();
         let mut print_events: Vec<Event> = Vec::new();
         let mut all_events: Vec<Event> = (bar_start..=bar_stop)
             .map(|i| Event::new(Fraction::from_integer(i as i64)))
             .collect();
-        all_events.extend(score.events.clone());
+        all_events.extend(
+            score
+                .events
+                .iter()
+                .filter(|event| visible_from <= event.bar && event.bar < visible_to)
+                .cloned(),
+        );
         all_events.sort_by(|a, b| {
             a.bar
                 .partial_cmp(&b.bar)
@@ -620,12 +813,6 @@ impl<'a> DirectRenderer<'a> {
         }
 
         for event in &print_events {
-            if !(bar_start_f - Fraction::from_integer(1) <= event.bar
-                && event.bar < bar_stop_f + Fraction::from_integer(1))
-            {
-                continue;
-            }
-
             let mut parts = Vec::new();
             if event.bar.trunc() == *event.bar.numer() && *event.bar.denom() == 1 {
                 parts.push(format!("#{}", format_g(event.bar.to_f64())));
@@ -716,79 +903,102 @@ impl<'a> DirectRenderer<'a> {
 
     fn collect_note_layers(
         &self,
-        score: &mut Score,
+        render_index: &RenderIndex,
+        notes_snapshot: &[NoteData],
         bar_start_f: Fraction,
         bar_stop_f: Fraction,
     ) -> SegmentLayers {
-        let active = score.active_notes.clone();
-        let notes_snapshot = score.notes.clone();
         let mut layers = SegmentLayers::default();
+        let window_start = bar_start_f - Fraction::from_integer(1);
+        let window_stop = bar_stop_f + Fraction::from_integer(1);
+        let start = render_index
+            .note_bars
+            .partition_point(|&bar| bar < window_start);
+        let stop = render_index
+            .note_bars
+            .partition_point(|&bar| bar < window_stop);
 
-        for (idx_in_active, &note_idx) in active.iter().enumerate() {
+        for &note_idx in &render_index.active_notes[start..stop] {
             let note = &notes_snapshot[note_idx];
-            if !note_visible(note, &notes_snapshot, bar_start_f, bar_stop_f) {
+            if note.is_slide() && !note_visible(note, notes_snapshot, bar_start_f, bar_stop_f) {
                 continue;
             }
+            self.collect_visible_note(&mut layers, render_index, notes_snapshot, note_idx, note);
+        }
 
-            if let Some(tick_val) = note.is_tick(&notes_snapshot) {
-                if tick_val {
-                    let mut next_tick_idx = note_idx;
-                    for &nidx in &active[idx_in_active..] {
-                        let n = &notes_snapshot[nidx];
-                        if n.is_tick(&notes_snapshot) == Some(true) && n.bar() > note.bar() {
-                            next_tick_idx = nidx;
-                            break;
-                        }
-                    }
-                    layers.ticks.push(TickCommand::Text {
-                        note_idx,
-                        next_idx: next_tick_idx,
-                    });
-                } else {
-                    layers.ticks.push(TickCommand::Short { bar: note.bar() });
-                }
+        let slide_stop = render_index
+            .slide_start_bars
+            .partition_point(|&bar| bar < window_start);
+        for &note_idx in &render_index.slide_starts[..slide_stop] {
+            let note = &notes_snapshot[note_idx];
+            if note_visible(note, notes_snapshot, bar_start_f, bar_stop_f) {
+                self.collect_visible_note(
+                    &mut layers,
+                    render_index,
+                    notes_snapshot,
+                    note_idx,
+                    note,
+                );
             }
+        }
 
-            match note {
-                NoteData::Tap(..) => layers.notes.push(note_idx),
-                NoteData::Directional(..) => {
-                    layers.flicks.push(note_idx);
-                    layers.notes.push(note_idx);
-                }
-                NoteData::Slide(_, slide) => {
-                    if !slide.decoration {
-                        match SlideType::from_i32(note.note_type()) {
-                            Some(SlideType::Start) => {
-                                layers.slide_paths.push(note_idx);
-                                layers.notes.push(note_idx);
-                            }
-                            Some(SlideType::End) => {
-                                if slide.directional_idx != NO_NOTE {
-                                    layers.flicks.push(note_idx);
-                                }
-                                layers.notes.push(note_idx);
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        if matches!(
-                            SlideType::from_i32(note.note_type()),
-                            Some(SlideType::Start)
-                        ) {
+        layers
+    }
+
+    fn collect_visible_note(
+        &self,
+        layers: &mut SegmentLayers,
+        render_index: &RenderIndex,
+        notes_snapshot: &[NoteData],
+        note_idx: NoteIdx,
+        note: &NoteData,
+    ) {
+        if let Some(tick_val) = note.is_tick(notes_snapshot) {
+            if tick_val {
+                let next_idx = render_index.next_ticks[note_idx];
+                layers.ticks.push(TickCommand::Text { note_idx, next_idx });
+            } else {
+                layers.ticks.push(TickCommand::Short { bar: note.bar() });
+            }
+        }
+
+        match note {
+            NoteData::Tap(..) => layers.notes.push(note_idx),
+            NoteData::Directional(..) => {
+                layers.flicks.push(note_idx);
+                layers.notes.push(note_idx);
+            }
+            NoteData::Slide(_, slide) => {
+                if !slide.decoration {
+                    match SlideType::from_i32(note.note_type()) {
+                        Some(SlideType::Start) => {
                             layers.slide_paths.push(note_idx);
+                            layers.notes.push(note_idx);
                         }
-                        if slide.tap_idx != NO_NOTE {
-                            layers.notes.push(slide.tap_idx);
+                        Some(SlideType::End) => {
                             if slide.directional_idx != NO_NOTE {
                                 layers.flicks.push(note_idx);
                             }
+                            layers.notes.push(note_idx);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    if matches!(
+                        SlideType::from_i32(note.note_type()),
+                        Some(SlideType::Start)
+                    ) {
+                        layers.slide_paths.push(note_idx);
+                    }
+                    if slide.tap_idx != NO_NOTE {
+                        layers.notes.push(slide.tap_idx);
+                        if slide.directional_idx != NO_NOTE {
+                            layers.flicks.push(note_idx);
                         }
                     }
                 }
             }
         }
-
-        layers
     }
 
     fn draw_slide_path(
@@ -964,7 +1174,7 @@ impl<'a> DirectRenderer<'a> {
             2
         };
 
-        if self.draw_note_image_asset(canvas, note_number, x, y - h / 2.0, w, h) {
+        if self.draw_note_image_asset(canvas, note_number, note.width() + 1, x, y - h / 2.0, w, h) {
             return;
         }
 
@@ -1196,11 +1406,17 @@ impl<'a> DirectRenderer<'a> {
         &self,
         canvas: &skia_safe::Canvas,
         note_number: i32,
+        width_units: i32,
         x: f64,
         y: f64,
         width: f64,
         height: f64,
     ) -> bool {
+        if let Some(image) = self.note_assets.sliced_note(note_number, width_units) {
+            draw_image(canvas, image, x, y, width, height);
+            return true;
+        }
+
         let name = format!("notes_{note_number}");
         let Some(image) = self.note_assets.get(&name) else {
             return false;
@@ -1420,6 +1636,12 @@ impl<'a> DirectRenderer<'a> {
     }
 
     fn font(&self, size: f32, weight: i32) -> Font {
+        let key = FontKey::new(size, weight);
+        let mut cache = self.font_cache.lock().expect("font cache lock poisoned");
+        if let Some(font) = cache.get(&key) {
+            return font.clone();
+        }
+
         let bold = weight >= 700;
         let style = if bold {
             FontStyle::bold()
@@ -1453,6 +1675,7 @@ impl<'a> DirectRenderer<'a> {
         if bold {
             font.set_embolden(true);
         }
+        cache.insert(key, font.clone());
         font
     }
 }
@@ -1463,6 +1686,75 @@ struct SegmentLayers {
     notes: Vec<NoteIdx>,
     flicks: Vec<NoteIdx>,
     ticks: Vec<TickCommand>,
+}
+
+struct SegmentRaster {
+    width: i32,
+    height: i32,
+    image: Image,
+}
+
+struct RenderIndex {
+    active_notes: Vec<NoteIdx>,
+    note_bars: Vec<Fraction>,
+    slide_starts: Vec<NoteIdx>,
+    slide_start_bars: Vec<Fraction>,
+    next_ticks: Vec<NoteIdx>,
+}
+
+impl RenderIndex {
+    fn new(active_notes: &[NoteIdx], notes: &[NoteData]) -> Self {
+        let active_notes = active_notes.to_vec();
+        let note_bars = active_notes
+            .iter()
+            .map(|&idx| notes[idx].bar())
+            .collect::<Vec<_>>();
+        let slide_starts = active_notes
+            .iter()
+            .copied()
+            .filter(|&idx| {
+                matches!(
+                    notes[idx],
+                    NoteData::Slide(_, ref slide)
+                        if matches!(SlideType::from_i32(notes[idx].note_type()), Some(SlideType::Start))
+                            && slide.head_idx != NO_NOTE
+                )
+            })
+            .collect::<Vec<_>>();
+        let slide_start_bars = slide_starts
+            .iter()
+            .map(|&idx| notes[idx].bar())
+            .collect::<Vec<_>>();
+
+        let mut next_ticks = vec![NO_NOTE; notes.len()];
+        let tick_notes = active_notes
+            .iter()
+            .copied()
+            .filter(|&idx| notes[idx].is_tick(notes) == Some(true))
+            .collect::<Vec<_>>();
+        let mut group_start = 0;
+        while group_start < tick_notes.len() {
+            let group_bar = notes[tick_notes[group_start]].bar();
+            let mut group_end = group_start + 1;
+            while group_end < tick_notes.len() && notes[tick_notes[group_end]].bar() == group_bar {
+                group_end += 1;
+            }
+
+            let next_group_idx = tick_notes.get(group_end).copied();
+            for &idx in &tick_notes[group_start..group_end] {
+                next_ticks[idx] = next_group_idx.unwrap_or(idx);
+            }
+            group_start = group_end;
+        }
+
+        Self {
+            active_notes,
+            note_bars,
+            slide_starts,
+            slide_start_bars,
+            next_ticks,
+        }
+    }
 }
 
 enum TickCommand {
@@ -1497,8 +1789,10 @@ enum AmongKind {
     FrictionCritical,
 }
 
+#[derive(Clone)]
 struct NoteAssets {
     images: HashMap<String, Image>,
+    sliced_notes: HashMap<NoteBodyKey, Image>,
 }
 
 impl NoteAssets {
@@ -1517,12 +1811,49 @@ impl NoteAssets {
             images.insert(name, image);
         }
 
-        Self { images }
+        let mut sliced_notes = HashMap::new();
+        let note_height = cfg.lane_width as f64 / 64.0 * 56.0 * 2.0;
+        for note_number in 0..=6 {
+            let name = format!("notes_{note_number}");
+            let Some(image) = images.get(&name) else {
+                continue;
+            };
+            for width_units in 1..=13 {
+                let width = cfg.lane_width as f64 * width_units as f64;
+                if let Some(sliced) = render_sliced_note_image(image, width, note_height) {
+                    sliced_notes.insert(
+                        NoteBodyKey {
+                            note_number,
+                            width_units,
+                        },
+                        sliced,
+                    );
+                }
+            }
+        }
+
+        Self {
+            images,
+            sliced_notes,
+        }
     }
 
     fn get(&self, name: &str) -> Option<&Image> {
         self.images.get(name)
     }
+
+    fn sliced_note(&self, note_number: i32, width_units: i32) -> Option<&Image> {
+        self.sliced_notes.get(&NoteBodyKey {
+            note_number,
+            width_units,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct NoteBodyKey {
+    note_number: i32,
+    width_units: i32,
 }
 
 fn note_asset_names() -> Vec<String> {
@@ -1568,10 +1899,70 @@ fn note_asset_path(cfg: &DrawingConfig, name: &str) -> Option<PathBuf> {
     if path.exists() { Some(path) } else { None }
 }
 
+fn should_render_segments_parallel(layout: &Layout) -> bool {
+    layout.segments.len() > 1
+        && std::thread::available_parallelism()
+            .map(|threads| threads.get() > 1)
+            .unwrap_or(false)
+}
+
+fn segment_score(source: &Score) -> Score {
+    Score {
+        meta: source.meta.clone(),
+        notes: Vec::new(),
+        active_notes: source.active_notes.clone(),
+        events: source.events.clone(),
+        timed_events_cache: source.timed_events_cache.clone(),
+        time_cache: HashMap::new(),
+        time_f64_cache: HashMap::new(),
+    }
+}
+
+fn draw_segment_image(
+    canvas: &skia_safe::Canvas,
+    raster: &SegmentRaster,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), SkiaDirectError> {
+    canvas.save();
+    canvas.clip_rect(
+        Rect::from_xywh(as_f32(x), as_f32(y), as_f32(width), as_f32(height)),
+        None,
+        Some(true),
+    );
+    draw_image(
+        canvas,
+        &raster.image,
+        x,
+        y,
+        raster.width as f64,
+        raster.height as f64,
+    );
+    canvas.restore();
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum TextAnchor {
     Start,
     End,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct FontKey {
+    size_bits: u32,
+    weight: i32,
+}
+
+impl FontKey {
+    fn new(size: f32, weight: i32) -> Self {
+        Self {
+            size_bits: size.to_bits(),
+            weight,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2075,6 +2466,20 @@ fn draw_sliced_note_image(
     }
 }
 
+fn render_sliced_note_image(image: &Image, width: f64, height: f64) -> Option<Image> {
+    let width_px = round_even(width) as i32;
+    let height_px = round_even(height) as i32;
+    if width_px <= 0 || height_px <= 0 {
+        return None;
+    }
+
+    let mut surface = surfaces::raster_n32_premul((width_px, height_px))?;
+    let canvas = surface.canvas();
+    canvas.clear(Color::TRANSPARENT);
+    draw_sliced_note_image(canvas, image, 0.0, 0.0, width, height);
+    Some(surface.image_snapshot())
+}
+
 fn draw_image(canvas: &skia_safe::Canvas, image: &Image, x: f64, y: f64, width: f64, height: f64) {
     let dst = rect(x, y, width, height);
     let paint = image_paint();
@@ -2212,6 +2617,7 @@ struct CssRuleStyle {
     font_weight: Option<i32>,
 }
 
+#[derive(Clone)]
 struct CssStyles {
     rules: HashMap<String, CssRuleStyle>,
 }

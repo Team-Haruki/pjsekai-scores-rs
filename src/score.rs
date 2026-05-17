@@ -25,6 +25,10 @@ pub struct Score {
     pub events: Vec<Event>,
     /// Cached timed events (time_fraction, merged_event) — uses Fraction for exact arithmetic
     pub timed_events_cache: Option<Vec<(Fraction, Event)>>,
+    /// Cached exact elapsed time for queried bar positions.
+    pub time_cache: HashMap<Fraction, Fraction>,
+    /// Cached limited-denominator elapsed time for rendering coordinates.
+    pub time_f64_cache: HashMap<Fraction, f64>,
 }
 
 impl Score {
@@ -35,6 +39,8 @@ impl Score {
             active_notes: Vec::new(),
             events: Vec::new(),
             timed_events_cache: None,
+            time_cache: HashMap::new(),
+            time_f64_cache: HashMap::new(),
         }
     }
 
@@ -323,6 +329,8 @@ impl Score {
         }
         self.events = merged;
         self.timed_events_cache = None;
+        self.time_cache.clear();
+        self.time_f64_cache.clear();
     }
 
     /// Compute timed events: (elapsed_time_fraction, merged_event) list
@@ -360,21 +368,22 @@ impl Score {
     /// Matches Python's `bisect.bisect(...) - 1`: picks the LAST entry whose
     /// bar <= target, so duplicate-bar events resolve to the most-merged state.
     pub fn get_timed_event(&mut self, bar: Fraction) -> (Fraction, Event) {
-        let timed = self.timed_events().to_vec();
-        let after = timed.partition_point(|probe| probe.1.bar <= bar);
-        let idx = if after == 0 { 0 } else { after - 1 };
-
+        let timed = self.timed_events();
+        let idx = Self::timed_event_index(timed, bar);
         let (ref t, ref e) = timed[idx];
-        let bpm = e.bpm.unwrap_or(Fraction::from_integer(120));
-        let bar_length = e.bar_length.unwrap_or(Fraction::from_integer(4));
-        let delta = bar - e.bar;
-        let time = (*t + bar_length * Fraction::from_integer(60) / bpm * delta)
-            .limit_denominator(1_000_000_000);
-        (time, e.clone())
+        (Self::time_from_timed_event(*t, e, bar), e.clone())
     }
 
     pub fn get_time(&mut self, bar: Fraction) -> Fraction {
-        self.get_timed_event(bar).0
+        if let Some(time) = self.time_cache.get(&bar) {
+            return *time;
+        }
+        let time = {
+            let timed = self.timed_events();
+            Self::time_at(timed, bar)
+        };
+        self.time_cache.insert(bar, time);
+        time
     }
 
     pub fn get_event(&mut self, bar: Fraction) -> Event {
@@ -393,9 +402,34 @@ impl Score {
         // Limit each operand's denominator before subtraction to keep
         // Ratio<i64> arithmetic within range (raw subtraction of two timed
         // fractions with 10^9 denominators overflows i64 in num * den).
-        let t_to = self.get_time(bar_to).limit_denominator(1_000_000);
-        let t_from = self.get_time(bar_from).limit_denominator(1_000_000);
-        (t_to - t_from).to_f64()
+        self.get_limited_time_f64(bar_to) - self.get_limited_time_f64(bar_from)
+    }
+
+    fn get_limited_time_f64(&mut self, bar: Fraction) -> f64 {
+        if let Some(time) = self.time_f64_cache.get(&bar) {
+            return *time;
+        }
+        let time = self.get_time(bar).limit_denominator(1_000_000).to_f64();
+        self.time_f64_cache.insert(bar, time);
+        time
+    }
+
+    fn time_at(timed: &[(Fraction, Event)], bar: Fraction) -> Fraction {
+        let idx = Self::timed_event_index(timed, bar);
+        let (ref t, ref e) = timed[idx];
+        Self::time_from_timed_event(*t, e, bar)
+    }
+
+    fn timed_event_index(timed: &[(Fraction, Event)], bar: Fraction) -> usize {
+        let after = timed.partition_point(|probe| probe.1.bar <= bar);
+        if after == 0 { 0 } else { after - 1 }
+    }
+
+    fn time_from_timed_event(t: Fraction, event: &Event, bar: Fraction) -> Fraction {
+        let bpm = event.bpm.unwrap_or(Fraction::from_integer(120));
+        let bar_length = event.bar_length.unwrap_or(Fraction::from_integer(4));
+        let delta = bar - event.bar;
+        (t + bar_length * Fraction::from_integer(60) / bpm * delta).limit_denominator(1_000_000_000)
     }
 
     /// Inverse: get bar position from elapsed time
