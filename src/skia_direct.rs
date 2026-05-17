@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use skia_safe::{
     Color, Data, EncodedImageFormat, FilterMode, Font, FontMgr, FontStyle, Image, Paint,
-    PaintStyle, PathBuilder, Point, Rect, SamplingOptions, surfaces,
+    PaintStyle, PathBuilder, Point, Rect, SamplingOptions, Typeface, Unichar, surfaces,
 };
 
 use crate::drawing::{CoverObject, Drawing, DrawingConfig};
@@ -21,12 +21,35 @@ use crate::score::Score;
 
 type BezierPoints = [(f64, f64); 4];
 
+const FALLBACK_FONT_FAMILIES: &[&str] = &[
+    "Hiragino Sans",
+    "Hiragino Kaku Gothic Pro",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK SC",
+    "Noto Sans JP",
+    "Source Han Sans",
+    "Source Han Sans JP",
+    "Source Han Sans SC",
+    "WenQuanYi Zen Hei",
+    "Yu Gothic",
+    "Meiryo",
+    "Microsoft YaHei",
+    "Avenir",
+    "Helvetica Neue",
+    "Arial",
+    "sans-serif",
+];
+
 #[derive(Debug)]
 pub enum SkiaDirectError {
     InvalidSize,
     Surface,
     RenderWorker,
     Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Font {
         path: PathBuf,
         source: std::io::Error,
     },
@@ -65,6 +88,9 @@ impl fmt::Display for SkiaDirectError {
             SkiaDirectError::Io { path, source } => {
                 write!(f, "failed to read image asset {}: {source}", path.display())
             }
+            SkiaDirectError::Font { path, source } => {
+                write!(f, "failed to read font {}: {source}", path.display())
+            }
             SkiaDirectError::Decode(path) => {
                 write!(f, "failed to decode image asset {}", path.display())
             }
@@ -76,7 +102,9 @@ impl fmt::Display for SkiaDirectError {
 impl std::error::Error for SkiaDirectError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SkiaDirectError::Io { source, .. } => Some(source),
+            SkiaDirectError::Io { source, .. } | SkiaDirectError::Font { source, .. } => {
+                Some(source)
+            }
             _ => None,
         }
     }
@@ -132,7 +160,7 @@ pub fn score_to_skia_image_with_stats(
     let mut surface =
         surfaces::raster_n32_premul((width, height)).ok_or(SkiaDirectError::Surface)?;
     let styles = CssStyles::parse(&drawing.style_sheet);
-    let renderer = DirectRenderer::new(drawing, styles);
+    let renderer = DirectRenderer::new(drawing, styles)?;
     let setup_duration = setup_started.elapsed();
     let draw_started = Instant::now();
     renderer.draw_page(surface.canvas(), score, lyric, &layout)?;
@@ -259,20 +287,23 @@ struct DirectRenderer<'a> {
     drawing: &'a Drawing,
     styles: CssStyles,
     font_mgr: FontMgr,
+    custom_typefaces: HashMap<String, Vec<Typeface>>,
     note_assets: NoteAssets,
     font_cache: Mutex<HashMap<FontKey, Font>>,
 }
 
 impl<'a> DirectRenderer<'a> {
-    fn new(drawing: &'a Drawing, styles: CssStyles) -> Self {
+    fn new(drawing: &'a Drawing, styles: CssStyles) -> Result<Self, SkiaDirectError> {
         let note_assets = NoteAssets::load(&drawing.config);
-        Self {
+        let (font_mgr, custom_typefaces) = build_font_manager(&drawing.config)?;
+        Ok(Self {
             drawing,
             styles,
-            font_mgr: FontMgr::default(),
+            font_mgr,
+            custom_typefaces,
             note_assets,
             font_cache: Mutex::new(HashMap::new()),
-        }
+        })
     }
 
     fn draw_page(
@@ -457,11 +488,13 @@ impl<'a> DirectRenderer<'a> {
                     let start_idx = chunk_idx * chunk_size;
                     let styles = self.styles.clone();
                     let note_assets = self.note_assets.clone();
+                    let custom_typefaces = self.custom_typefaces.clone();
                     scope.spawn(move || {
                         let renderer = DirectRenderer {
                             drawing,
                             styles,
                             font_mgr: FontMgr::default(),
+                            custom_typefaces,
                             note_assets,
                             font_cache: Mutex::new(HashMap::new()),
                         };
@@ -1594,7 +1627,7 @@ impl<'a> DirectRenderer<'a> {
         let size = style.font_size.unwrap_or(defaults.size);
         let weight = style.font_weight.unwrap_or(defaults.weight);
         let paint = fill_paint(color);
-        let font = self.font(size, weight);
+        let font = self.font(size, weight, style.font_families.as_deref(), text);
         let mut draw_x = x;
         if matches!(anchor, TextAnchor::End) {
             let (width, _) = font.measure_str(text, Some(&paint));
@@ -1635,8 +1668,9 @@ impl<'a> DirectRenderer<'a> {
         self.styles.get(class_name).fill.unwrap_or(fallback)
     }
 
-    fn font(&self, size: f32, weight: i32) -> Font {
-        let key = FontKey::new(size, weight);
+    fn font(&self, size: f32, weight: i32, font_families: Option<&[String]>, text: &str) -> Font {
+        let required_cjk_glyphs = required_cjk_glyphs(text);
+        let key = FontKey::new(size, weight, font_families, &required_cjk_glyphs);
         let mut cache = self.font_cache.lock().expect("font cache lock poisoned");
         if let Some(font) = cache.get(&key) {
             return font.clone();
@@ -1648,22 +1682,20 @@ impl<'a> DirectRenderer<'a> {
         } else {
             FontStyle::normal()
         };
-        let families = [
-            "Hiragino Sans",
-            "Hiragino Kaku Gothic Pro",
-            "Noto Sans CJK JP",
-            "Noto Sans JP",
-            "Yu Gothic",
-            "Meiryo",
-            "Avenir",
-            "Helvetica Neue",
-            "Arial",
-            "sans-serif",
-        ];
-        let typeface = families
-            .iter()
-            .find_map(|family| self.font_mgr.match_family_style(*family, style))
-            .or_else(|| self.font_mgr.legacy_make_typeface(None, style));
+        let typeface = font_families
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .chain(FALLBACK_FONT_FAMILIES.iter().copied())
+            .filter_map(|family| self.match_font_family(family, style, &required_cjk_glyphs))
+            .next()
+            .or_else(|| {
+                if required_cjk_glyphs.is_empty() {
+                    self.font_mgr.legacy_make_typeface(None, style)
+                } else {
+                    self.match_any_custom_font(style, &required_cjk_glyphs)
+                }
+            });
         let mut font = if let Some(typeface) = typeface {
             Font::new(typeface, Some(size))
         } else {
@@ -1677,6 +1709,64 @@ impl<'a> DirectRenderer<'a> {
         }
         cache.insert(key, font.clone());
         font
+    }
+
+    fn match_font_family(
+        &self,
+        family: &str,
+        style: FontStyle,
+        required_cjk_glyphs: &[Unichar],
+    ) -> Option<Typeface> {
+        let family = family.trim();
+        if family.is_empty() {
+            return None;
+        }
+
+        if let Some(typeface) = self.match_custom_font_family(family, style, required_cjk_glyphs) {
+            return Some(typeface);
+        }
+
+        let typeface = if family.eq_ignore_ascii_case("serif")
+            || family.eq_ignore_ascii_case("sans-serif")
+            || family.eq_ignore_ascii_case("monospace")
+        {
+            self.font_mgr.legacy_make_typeface(Some(family), style)
+        } else {
+            self.font_mgr.match_family_style(family, style)
+        }?;
+
+        if !typeface_supports_glyphs(&typeface, required_cjk_glyphs) {
+            return None;
+        }
+        Some(typeface)
+    }
+
+    fn match_custom_font_family(
+        &self,
+        family: &str,
+        style: FontStyle,
+        required_cjk_glyphs: &[Unichar],
+    ) -> Option<Typeface> {
+        let requested = normalize_family_lookup(family);
+        let candidates = self.custom_typefaces.get(&requested)?;
+        let best = candidates
+            .iter()
+            .filter(|typeface| typeface_supports_glyphs(typeface, required_cjk_glyphs))
+            .min_by_key(|typeface| font_style_distance(typeface.font_style(), style))?;
+        Some(best.clone())
+    }
+
+    fn match_any_custom_font(
+        &self,
+        style: FontStyle,
+        required_cjk_glyphs: &[Unichar],
+    ) -> Option<Typeface> {
+        self.custom_typefaces
+            .values()
+            .flatten()
+            .filter(|typeface| typeface_supports_glyphs(typeface, required_cjk_glyphs))
+            .min_by_key(|typeface| font_style_distance(typeface.font_style(), style))
+            .cloned()
     }
 }
 
@@ -1850,6 +1940,107 @@ impl NoteAssets {
     }
 }
 
+fn build_font_manager(
+    config: &DrawingConfig,
+) -> Result<(FontMgr, HashMap<String, Vec<Typeface>>), SkiaDirectError> {
+    let system_mgr = FontMgr::default();
+    let font_paths = collect_font_paths(config);
+    if font_paths.is_empty() {
+        return Ok((system_mgr, HashMap::new()));
+    }
+
+    let mut custom_typefaces = HashMap::<String, Vec<Typeface>>::new();
+    for path in font_paths {
+        let bytes = fs::read(&path).map_err(|source| SkiaDirectError::Font {
+            path: path.clone(),
+            source,
+        })?;
+        for typeface in load_typefaces_from_data(&system_mgr, &bytes) {
+            register_custom_typeface(&mut custom_typefaces, typeface);
+        }
+    }
+
+    Ok((system_mgr, custom_typefaces))
+}
+
+fn load_typefaces_from_data(font_mgr: &FontMgr, bytes: &[u8]) -> Vec<Typeface> {
+    let mut faces = Vec::new();
+    for ttc_index in 0..32 {
+        let Some(typeface) = font_mgr.new_from_data(bytes, Some(ttc_index)) else {
+            if ttc_index == 0 {
+                return faces;
+            }
+            break;
+        };
+        faces.push(typeface);
+    }
+    faces
+}
+
+fn collect_font_paths(config: &DrawingConfig) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for path in &config.font_paths {
+        let path = PathBuf::from(path);
+        if is_font_path(&path) {
+            paths.push(path);
+        }
+    }
+    for dir in &config.font_dirs {
+        collect_font_paths_from_dir(Path::new(dir), &mut paths);
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn collect_font_paths_from_dir(dir: &Path, paths: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_font_paths_from_dir(&path, paths);
+        } else if is_font_path(&path) {
+            paths.push(path);
+        }
+    }
+}
+
+fn is_font_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("ttf")
+                || extension.eq_ignore_ascii_case("otf")
+                || extension.eq_ignore_ascii_case("ttc")
+        })
+}
+
+fn register_custom_typeface(
+    custom_typefaces: &mut HashMap<String, Vec<Typeface>>,
+    typeface: Typeface,
+) {
+    let mut names = typeface
+        .new_family_name_iterator()
+        .map(|localized| localized.string)
+        .collect::<Vec<_>>();
+    names.push(typeface.family_name());
+    if let Some(post_script_name) = typeface.post_script_name() {
+        names.push(post_script_name);
+    }
+
+    for name in names {
+        let name = normalize_family_lookup(&name);
+        if !name.is_empty() {
+            custom_typefaces
+                .entry(name)
+                .or_default()
+                .push(typeface.clone());
+        }
+    }
+}
+
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct NoteBodyKey {
     note_number: i32,
@@ -1954,13 +2145,22 @@ enum TextAnchor {
 struct FontKey {
     size_bits: u32,
     weight: i32,
+    family_hash: u64,
+    cjk_hash: u64,
 }
 
 impl FontKey {
-    fn new(size: f32, weight: i32) -> Self {
+    fn new(
+        size: f32,
+        weight: i32,
+        font_families: Option<&[String]>,
+        required_cjk_glyphs: &[Unichar],
+    ) -> Self {
         Self {
             size_bits: size.to_bits(),
             weight,
+            family_hash: hash_font_families(font_families),
+            cjk_hash: hash_required_glyphs(required_cjk_glyphs),
         }
     }
 }
@@ -2608,13 +2808,14 @@ impl RGBA {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct CssRuleStyle {
     fill: Option<RGBA>,
     stroke: Option<RGBA>,
     stroke_width: Option<f32>,
     font_size: Option<f32>,
     font_weight: Option<i32>,
+    font_families: Option<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -2646,7 +2847,7 @@ impl CssStyles {
                     continue;
                 }
                 let entry = rules.entry(class_name.to_string()).or_default();
-                entry.merge(parsed);
+                entry.merge(&parsed);
             }
             cursor = close + 1;
         }
@@ -2654,12 +2855,12 @@ impl CssStyles {
     }
 
     fn get(&self, class_name: &str) -> CssRuleStyle {
-        self.rules.get(class_name).copied().unwrap_or_default()
+        self.rules.get(class_name).cloned().unwrap_or_default()
     }
 }
 
 impl CssRuleStyle {
-    fn merge(&mut self, other: CssRuleStyle) {
+    fn merge(&mut self, other: &CssRuleStyle) {
         if other.fill.is_some() {
             self.fill = other.fill;
         }
@@ -2674,6 +2875,9 @@ impl CssRuleStyle {
         }
         if other.font_weight.is_some() {
             self.font_weight = other.font_weight;
+        }
+        if other.font_families.is_some() {
+            self.font_families.clone_from(&other.font_families);
         }
     }
 }
@@ -2692,10 +2896,73 @@ fn parse_css_body(body: &str) -> CssRuleStyle {
             "stroke-width" => style.stroke_width = parse_css_number(value),
             "font-size" => style.font_size = parse_css_number(value),
             "font-weight" => style.font_weight = value.parse::<i32>().ok(),
+            "font-family" => style.font_families = parse_font_families(value),
             _ => {}
         }
     }
     style
+}
+
+fn parse_font_families(value: &str) -> Option<Vec<String>> {
+    let families = split_css_list(value)
+        .into_iter()
+        .filter_map(|family| normalize_font_family(&family))
+        .collect::<Vec<_>>();
+    if families.is_empty() {
+        None
+    } else {
+        Some(families)
+    }
+}
+
+fn split_css_list(value: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in value.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(quote_char) = quote {
+            if ch == quote_char {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ',' => {
+                items.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        items.push(current.trim().to_string());
+    }
+    items
+}
+
+fn normalize_font_family(value: &str) -> Option<String> {
+    let family = value.trim();
+    if family.is_empty()
+        || family.eq_ignore_ascii_case("inherit")
+        || family.eq_ignore_ascii_case("initial")
+    {
+        return None;
+    }
+    Some(family.to_string())
 }
 
 fn parse_css_number(value: &str) -> Option<f32> {
@@ -2705,6 +2972,78 @@ fn parse_css_number(value: &str) -> Option<f32> {
         .trim()
         .parse::<f32>()
         .ok()
+}
+
+fn hash_font_families(font_families: Option<&[String]>) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    if let Some(families) = font_families {
+        for family in families {
+            for byte in family.as_bytes() {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            hash ^= 0xff;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+fn hash_required_glyphs(glyphs: &[Unichar]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for glyph in glyphs {
+        for byte in glyph.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+fn normalize_family_lookup(name: &str) -> String {
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn font_style_distance(candidate: FontStyle, requested: FontStyle) -> i32 {
+    ((*candidate.weight() - *requested.weight()).abs() * 100)
+        + ((*candidate.width() - *requested.width()).abs() * 10)
+        + i32::from(candidate.slant() != requested.slant())
+}
+
+fn required_cjk_glyphs(text: &str) -> Vec<Unichar> {
+    let mut glyphs = text
+        .chars()
+        .filter(|ch| is_cjk_char(*ch))
+        .map(|ch| ch as Unichar)
+        .collect::<Vec<_>>();
+    glyphs.sort_unstable();
+    glyphs.dedup();
+    glyphs
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x2e80..=0x2eff
+            | 0x3000..=0x303f
+            | 0x3040..=0x30ff
+            | 0x31f0..=0x31ff
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xf900..=0xfaff
+            | 0xff00..=0xffef
+            | 0x20000..=0x2ebef
+            | 0x30000..=0x3134f
+    )
+}
+
+fn typeface_supports_glyphs(typeface: &Typeface, required_glyphs: &[Unichar]) -> bool {
+    required_glyphs
+        .iter()
+        .all(|glyph| typeface.unichar_to_glyph(*glyph) != 0)
 }
 
 fn parse_color(value: &str) -> Option<RGBA> {
@@ -2823,5 +3162,50 @@ fn format_g(v: f64) -> String {
         } else {
             format!("{m}e-{:02}", -exp)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_css_body, parse_font_families};
+
+    #[test]
+    fn parses_unquoted_rodin_font_family() {
+        assert_eq!(
+            parse_font_families("FOT-RodinNTLG Pro DB"),
+            Some(vec!["FOT-RodinNTLG Pro DB".to_string()])
+        );
+    }
+
+    #[test]
+    fn parses_quoted_font_family_list() {
+        assert_eq!(
+            parse_font_families(
+                "\"ヒラギノ角ゴ Pro W3\", \"Hiragino Kaku Gothic Pro\", Osaka, sans-serif",
+            ),
+            Some(vec![
+                "ヒラギノ角ゴ Pro W3".to_string(),
+                "Hiragino Kaku Gothic Pro".to_string(),
+                "Osaka".to_string(),
+                "sans-serif".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn keeps_font_family_from_css_rule() {
+        let style = parse_css_body(
+            r#"
+            font-family: FOT-RodinNTLG Pro DB;
+            font-size: 36px;
+            font-weight: 700;
+            "#,
+        );
+        assert_eq!(
+            style.font_families,
+            Some(vec!["FOT-RodinNTLG Pro DB".to_string()])
+        );
+        assert_eq!(style.font_size, Some(36.0));
+        assert_eq!(style.font_weight, Some(700));
     }
 }

@@ -40,6 +40,8 @@ pub struct DrawingConfig {
     pub tick_2_length: i32,
     pub note_host: String,
     pub note_asset_extension: String,
+    pub font_paths: Vec<String>,
+    pub font_dirs: Vec<String>,
     pub target_segment_seconds: f64,
     /// Generator name shown in the SVG subtitle (default: "HarukiBot NEO")
     pub generator: String,
@@ -61,6 +63,8 @@ impl Default for DrawingConfig {
             tick_2_length: 8,
             note_host: "https://asset3.pjsekai.moe/live/note/custom01".to_string(),
             note_asset_extension: "png".to_string(),
+            font_paths: Vec::new(),
+            font_dirs: Vec::new(),
             target_segment_seconds: 8.0,
             generator: "HarukiBot NEO".to_string(),
         }
@@ -133,6 +137,44 @@ impl Drawing {
 
     pub fn set_note_asset_extension(&mut self, extension: impl Into<String>) {
         self.config.note_asset_extension = normalize_note_asset_extension(extension.into());
+    }
+
+    pub fn set_font_paths<I, S>(&mut self, paths: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config.font_paths = paths
+            .into_iter()
+            .map(Into::into)
+            .filter(|path| !path.trim().is_empty())
+            .collect();
+    }
+
+    pub fn add_font_path(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        if !path.trim().is_empty() {
+            self.config.font_paths.push(path);
+        }
+    }
+
+    pub fn set_font_dirs<I, S>(&mut self, dirs: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config.font_dirs = dirs
+            .into_iter()
+            .map(Into::into)
+            .filter(|dir| !dir.trim().is_empty())
+            .collect();
+    }
+
+    pub fn add_font_dir(&mut self, dir: impl Into<String>) {
+        let dir = dir.into();
+        if !dir.trim().is_empty() {
+            self.config.font_dirs.push(dir);
+        }
     }
 
     /// Generate a complete SVG string from a score

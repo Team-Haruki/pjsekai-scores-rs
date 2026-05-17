@@ -107,6 +107,8 @@ fn drawing_for_render(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
     note_asset_extension: Option<String>,
+    font_paths: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
 ) -> PyResult<Drawing> {
     let mm = parse_music_meta(music_meta)?;
     let mut drawing = Drawing::new(
@@ -119,6 +121,12 @@ fn drawing_for_render(
     );
     if let Some(extension) = note_asset_extension {
         drawing.set_note_asset_extension(extension);
+    }
+    if let Some(paths) = font_paths {
+        drawing.set_font_paths(paths);
+    }
+    if let Some(dirs) = font_dirs {
+        drawing.set_font_dirs(dirs);
     }
     Ok(drawing)
 }
@@ -646,7 +654,7 @@ struct PyDrawing {
 #[pymethods]
 impl PyDrawing {
     #[new]
-    #[pyo3(signature = (score=None, lyric=None, style_sheet=None, note_host=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
+    #[pyo3(signature = (score=None, lyric=None, style_sheet=None, note_host=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
     fn new(
         score: Option<PyRef<'_, PyScore>>,
         lyric: Option<PyRef<'_, PyLyric>>,
@@ -657,6 +665,8 @@ impl PyDrawing {
         target_segment_seconds: Option<f64>,
         generator: Option<String>,
         note_asset_extension: Option<String>,
+        font_paths: Option<Vec<String>>,
+        font_dirs: Option<Vec<String>>,
     ) -> PyResult<PyDrawing> {
         let drawing = drawing_for_render(
             note_host,
@@ -666,6 +676,8 @@ impl PyDrawing {
             target_segment_seconds,
             generator,
             note_asset_extension,
+            font_paths,
+            font_dirs,
         )?;
 
         Ok(PyDrawing {
@@ -781,6 +793,22 @@ impl PyDrawing {
         self.inner.config.time_height = v;
     }
 
+    fn set_font_paths(&mut self, paths: Vec<String>) {
+        self.inner.set_font_paths(paths);
+    }
+
+    fn add_font_path(&mut self, path: String) {
+        self.inner.add_font_path(path);
+    }
+
+    fn set_font_dirs(&mut self, dirs: Vec<String>) {
+        self.inner.set_font_dirs(dirs);
+    }
+
+    fn add_font_dir(&mut self, dir: String) {
+        self.inner.add_font_dir(dir);
+    }
+
     #[getter]
     fn lane_width(&self) -> i32 {
         self.inner.config.lane_width
@@ -793,7 +821,7 @@ impl PyDrawing {
 
 /// Convenience function: parse a score file and generate SVG in one call
 #[pyfunction]
-#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
 fn sus_to_svg(
     sus_path: &str,
     note_host: Option<String>,
@@ -805,6 +833,8 @@ fn sus_to_svg(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
     note_asset_extension: Option<String>,
+    font_paths: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
 ) -> PyResult<String> {
     let mut score = open_score_for_render(sus_path, rebase_json)?;
     let lyric = lyric_content.map(Lyric::load);
@@ -816,13 +846,15 @@ fn sus_to_svg(
         target_segment_seconds,
         generator,
         note_asset_extension,
+        font_paths,
+        font_dirs,
     )?;
     Ok(drawing.svg(&mut score, lyric.as_ref()))
 }
 
 /// Convenience function: parse a score file and generate PNG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
 fn sus_to_png<'py>(
     py: Python<'py>,
     sus_path: &str,
@@ -835,6 +867,8 @@ fn sus_to_png<'py>(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
     note_asset_extension: Option<String>,
+    font_paths: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let mut score = open_score_for_render(sus_path, rebase_json)?;
     let lyric = lyric_content.map(Lyric::load);
@@ -846,6 +880,8 @@ fn sus_to_png<'py>(
         target_segment_seconds,
         generator,
         note_asset_extension,
+        font_paths,
+        font_dirs,
     )?;
     let bytes = render_png_bytes(&mut drawing, &mut score, lyric.as_ref())?;
     Ok(PyBytes::new(py, &bytes))
@@ -853,7 +889,7 @@ fn sus_to_png<'py>(
 
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
 fn sus_to_jpg<'py>(
     py: Python<'py>,
     sus_path: &str,
@@ -866,6 +902,8 @@ fn sus_to_jpg<'py>(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
     note_asset_extension: Option<String>,
+    font_paths: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
     jpeg_quality: u8,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let mut score = open_score_for_render(sus_path, rebase_json)?;
@@ -878,6 +916,8 @@ fn sus_to_jpg<'py>(
         target_segment_seconds,
         generator,
         note_asset_extension,
+        font_paths,
+        font_dirs,
     )?;
     let bytes = render_jpeg_bytes(&mut drawing, &mut score, lyric.as_ref(), jpeg_quality)?;
     Ok(PyBytes::new(py, &bytes))
@@ -885,7 +925,7 @@ fn sus_to_jpg<'py>(
 
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
 fn sus_to_jpeg<'py>(
     py: Python<'py>,
     sus_path: &str,
@@ -898,6 +938,8 @@ fn sus_to_jpeg<'py>(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
     note_asset_extension: Option<String>,
+    font_paths: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
     jpeg_quality: u8,
 ) -> PyResult<Bound<'py, PyBytes>> {
     sus_to_jpg(
@@ -912,13 +954,15 @@ fn sus_to_jpeg<'py>(
         target_segment_seconds,
         generator,
         note_asset_extension,
+        font_paths,
+        font_dirs,
         jpeg_quality,
     )
 }
 
 /// Convenience function: parse a score file and generate SVG in one call
 #[pyfunction]
-#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
 fn score_to_svg(
     score_path: &str,
     note_host: Option<String>,
@@ -930,6 +974,8 @@ fn score_to_svg(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
     note_asset_extension: Option<String>,
+    font_paths: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
 ) -> PyResult<String> {
     sus_to_svg(
         score_path,
@@ -942,12 +988,14 @@ fn score_to_svg(
         target_segment_seconds,
         generator,
         note_asset_extension,
+        font_paths,
+        font_dirs,
     )
 }
 
 /// Convenience function: parse a score file and generate PNG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None))]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
 fn score_to_png<'py>(
     py: Python<'py>,
     score_path: &str,
@@ -960,6 +1008,8 @@ fn score_to_png<'py>(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
     note_asset_extension: Option<String>,
+    font_paths: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     sus_to_png(
         py,
@@ -973,12 +1023,14 @@ fn score_to_png<'py>(
         target_segment_seconds,
         generator,
         note_asset_extension,
+        font_paths,
+        font_dirs,
     )
 }
 
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
 fn score_to_jpg<'py>(
     py: Python<'py>,
     score_path: &str,
@@ -991,6 +1043,8 @@ fn score_to_jpg<'py>(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
     note_asset_extension: Option<String>,
+    font_paths: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
     jpeg_quality: u8,
 ) -> PyResult<Bound<'py, PyBytes>> {
     sus_to_jpg(
@@ -1005,13 +1059,15 @@ fn score_to_jpg<'py>(
         target_segment_seconds,
         generator,
         note_asset_extension,
+        font_paths,
+        font_dirs,
         jpeg_quality,
     )
 }
 
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, jpeg_quality=90))]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
 fn score_to_jpeg<'py>(
     py: Python<'py>,
     score_path: &str,
@@ -1024,6 +1080,8 @@ fn score_to_jpeg<'py>(
     target_segment_seconds: Option<f64>,
     generator: Option<String>,
     note_asset_extension: Option<String>,
+    font_paths: Option<Vec<String>>,
+    font_dirs: Option<Vec<String>>,
     jpeg_quality: u8,
 ) -> PyResult<Bound<'py, PyBytes>> {
     score_to_jpg(
@@ -1038,6 +1096,8 @@ fn score_to_jpeg<'py>(
         target_segment_seconds,
         generator,
         note_asset_extension,
+        font_paths,
+        font_dirs,
         jpeg_quality,
     )
 }

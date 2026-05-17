@@ -38,6 +38,14 @@ struct Args {
     #[arg(long, default_value = "png")]
     note_asset_extension: String,
 
+    /// Font file path to load for Skia image output; may be repeated
+    #[arg(long = "font-path")]
+    font_paths: Vec<String>,
+
+    /// Directory containing .ttf/.otf/.ttc fonts for Skia image output; may be repeated
+    #[arg(long = "font-dir")]
+    font_dirs: Vec<String>,
+
     /// Music title shown in the chart footer
     #[arg(long)]
     title: Option<String>,
@@ -137,6 +145,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.generator,
     );
     drawing.set_note_asset_extension(args.note_asset_extension);
+    drawing.set_font_paths(args.font_paths);
+    drawing.set_font_dirs(args.font_dirs);
 
     let stats = match output_format(&output)? {
         OutputFormat::Svg => write_svg_output(&output, &mut drawing, &mut score, lyric.as_ref())?,
