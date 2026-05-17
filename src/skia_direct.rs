@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use skia_safe::{
     Color, Data, EncodedImageFormat, FilterMode, Font, FontMgr, FontStyle, Image, Paint,
@@ -20,6 +20,13 @@ use crate::notes::{NO_NOTE, NoteData, NoteIdx};
 use crate::score::Score;
 
 type BezierPoints = [(f64, f64); 4];
+type CustomTypefaceMap = HashMap<String, Vec<Typeface>>;
+type SharedCustomTypefaces = Arc<CustomTypefaceMap>;
+
+const CUSTOM_FONT_CACHE_MAX_ENTRIES: usize = 8;
+
+static CUSTOM_FONT_CACHE: LazyLock<Mutex<HashMap<Vec<FontFileKey>, SharedCustomTypefaces>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 const FALLBACK_FONT_FAMILIES: &[&str] = &[
     "Hiragino Sans",
@@ -287,7 +294,7 @@ struct DirectRenderer<'a> {
     drawing: &'a Drawing,
     styles: CssStyles,
     font_mgr: FontMgr,
-    custom_typefaces: HashMap<String, Vec<Typeface>>,
+    custom_typefaces: SharedCustomTypefaces,
     note_assets: NoteAssets,
     font_cache: Mutex<HashMap<FontKey, Font>>,
 }
@@ -1942,15 +1949,25 @@ impl NoteAssets {
 
 fn build_font_manager(
     config: &DrawingConfig,
-) -> Result<(FontMgr, HashMap<String, Vec<Typeface>>), SkiaDirectError> {
+) -> Result<(FontMgr, SharedCustomTypefaces), SkiaDirectError> {
     let system_mgr = FontMgr::default();
     let font_paths = collect_font_paths(config);
     if font_paths.is_empty() {
-        return Ok((system_mgr, HashMap::new()));
+        return Ok((system_mgr, Arc::new(HashMap::new())));
+    }
+    let cache_key = font_cache_key(&font_paths)?;
+
+    if let Some(custom_typefaces) = CUSTOM_FONT_CACHE
+        .lock()
+        .expect("custom font cache lock poisoned")
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok((system_mgr, custom_typefaces));
     }
 
     let mut custom_typefaces = HashMap::<String, Vec<Typeface>>::new();
-    for path in font_paths {
+    for path in &font_paths {
         let bytes = fs::read(&path).map_err(|source| SkiaDirectError::Font {
             path: path.clone(),
             source,
@@ -1959,6 +1976,15 @@ fn build_font_manager(
             register_custom_typeface(&mut custom_typefaces, typeface);
         }
     }
+
+    let custom_typefaces = Arc::new(custom_typefaces);
+    let mut cache = CUSTOM_FONT_CACHE
+        .lock()
+        .expect("custom font cache lock poisoned");
+    if cache.len() >= CUSTOM_FONT_CACHE_MAX_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(cache_key, Arc::clone(&custom_typefaces));
 
     Ok((system_mgr, custom_typefaces))
 }
@@ -2005,6 +2031,36 @@ fn collect_font_paths_from_dir(dir: &Path, paths: &mut Vec<PathBuf>) {
             paths.push(path);
         }
     }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct FontFileKey {
+    path: PathBuf,
+    modified_nanos: Option<u128>,
+    len: u64,
+}
+
+fn font_cache_key(font_paths: &[PathBuf]) -> Result<Vec<FontFileKey>, SkiaDirectError> {
+    font_paths
+        .iter()
+        .map(|path| {
+            let metadata = fs::metadata(path).map_err(|source| SkiaDirectError::Font {
+                path: path.clone(),
+                source,
+            })?;
+            Ok(FontFileKey {
+                path: path.clone(),
+                modified_nanos: metadata.modified().ok().and_then(system_time_nanos),
+                len: metadata.len(),
+            })
+        })
+        .collect()
+}
+
+fn system_time_nanos(time: SystemTime) -> Option<u128> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
 }
 
 fn is_font_path(path: &Path) -> bool {
