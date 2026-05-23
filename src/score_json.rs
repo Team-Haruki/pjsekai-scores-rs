@@ -406,10 +406,10 @@ fn parse_notes(
             if let Some(slide) = builder.notes[slide_idx].as_slide_mut() {
                 slide.head_idx = head_slide;
             }
-            if previous_slide != NO_NOTE {
-                if let Some(previous) = builder.notes[previous_slide].as_slide_mut() {
-                    previous.next_idx = slide_idx;
-                }
+            if previous_slide != NO_NOTE
+                && let Some(previous) = builder.notes[previous_slide].as_slide_mut()
+            {
+                previous.next_idx = slide_idx;
             }
 
             attach_connected_note(
