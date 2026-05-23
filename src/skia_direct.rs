@@ -6,8 +6,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use skia_safe::{
-    Color, Data, EncodedImageFormat, FilterMode, Font, FontMgr, FontStyle, Image, Paint,
-    PaintStyle, PathBuilder, Point, Rect, SamplingOptions, Typeface, Unichar, surfaces,
+    Color, Color4f, Data, EncodedImageFormat, FilterMode, Font, FontMgr, FontStyle, Image, Paint,
+    PaintStyle, PathBuilder, Point, Rect, SamplingOptions, TileMode, Typeface, Unichar, gradient,
+    surfaces,
 };
 
 use crate::drawing::{CoverObject, Drawing, DrawingConfig};
@@ -1129,16 +1130,24 @@ impl<'a> DirectRenderer<'a> {
             .as_slide()
             .map(|s| s.decoration)
             .unwrap_or(false);
-        let (class_name, fallback) = if is_decoration {
+        let (class_name, fallback, gradient_id) = if is_decoration {
             if is_critical {
-                ("decoration-critical", RGBA::rgba(0xfc, 0xf1, 0xc3, 0x99))
+                (
+                    "decoration-critical",
+                    RGBA::rgba(0xfc, 0xf1, 0xc3, 0x99),
+                    Some("decoration-critical-gradient"),
+                )
             } else {
-                ("decoration", RGBA::rgba(0xc9, 0xfc, 0xe2, 0x99))
+                (
+                    "decoration",
+                    RGBA::rgba(0xc9, 0xfc, 0xe2, 0x99),
+                    Some("decoration-gradient"),
+                )
             }
         } else if is_critical {
-            ("slide-critical", RGBA::rgba(0xfc, 0xf1, 0xc3, 0xcc))
+            ("slide-critical", RGBA::rgba(0xfc, 0xf1, 0xc3, 0xcc), None)
         } else {
-            ("slide", RGBA::rgba(0xc9, 0xfc, 0xe2, 0xcc))
+            ("slide", RGBA::rgba(0xc9, 0xfc, 0xe2, 0xcc), None)
         };
 
         let mut path = PathBuilder::new();
@@ -1156,7 +1165,15 @@ impl<'a> DirectRenderer<'a> {
         }
         path.close();
         let path = path.detach();
-        let paint = fill_paint(self.color(class_name, fallback));
+        let paint = if let Some(gradient_id) = gradient_id {
+            let stops = self
+                .styles
+                .gradient_stops(gradient_id, decoration_gradient_fallback(is_critical));
+            gradient_fill_paint(*path.bounds(), stops)
+                .unwrap_or_else(|| fill_paint(self.color(class_name, fallback)))
+        } else {
+            fill_paint(self.color(class_name, fallback))
+        };
         canvas.draw_path(&path, &paint);
     }
 
@@ -2766,6 +2783,33 @@ fn fill_paint(color: RGBA) -> Paint {
     paint
 }
 
+fn gradient_fill_paint(bounds: Rect, stops: GradientStops) -> Option<Paint> {
+    if bounds.is_empty() {
+        return None;
+    }
+    let colors = [
+        Color4f::from(stops.start.to_color()),
+        Color4f::from(stops.stop.to_color()),
+    ];
+    let gradient = gradient::Gradient::new(
+        gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None),
+        gradient::Interpolation::default(),
+    );
+    let shader = gradient::shaders::linear_gradient(
+        (
+            Point::new(bounds.left(), bounds.bottom()),
+            Point::new(bounds.left(), bounds.top()),
+        ),
+        &gradient,
+        None,
+    )?;
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_style(PaintStyle::Fill);
+    paint.set_shader(shader);
+    Some(paint)
+}
+
 fn stroke_paint(color: RGBA, width: f32) -> Paint {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
@@ -2861,6 +2905,26 @@ impl RGBA {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct GradientStops {
+    start: RGBA,
+    stop: RGBA,
+}
+
+fn decoration_gradient_fallback(is_critical: bool) -> GradientStops {
+    if is_critical {
+        GradientStops {
+            start: RGBA::rgba(0xfc, 0xf1, 0xc3, 0x99),
+            stop: RGBA::rgba(0xfc, 0xf1, 0xc3, 0x33),
+        }
+    } else {
+        GradientStops {
+            start: RGBA::rgba(0xc9, 0xfc, 0xe2, 0x99),
+            stop: RGBA::rgba(0xc9, 0xfc, 0xe2, 0x33),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 struct CssRuleStyle {
     fill: Option<RGBA>,
@@ -2874,12 +2938,14 @@ struct CssRuleStyle {
 #[derive(Clone)]
 struct CssStyles {
     rules: HashMap<String, CssRuleStyle>,
+    gradient_stops: HashMap<String, GradientStops>,
 }
 
 impl CssStyles {
     fn parse(css: &str) -> Self {
         let css = strip_css_comments(css);
         let mut rules = HashMap::<String, CssRuleStyle>::new();
+        let mut gradient_stops = HashMap::<String, GradientStops>::new();
         let mut cursor = 0usize;
         while let Some(open_rel) = css[cursor..].find('{') {
             let open = cursor + open_rel;
@@ -2890,25 +2956,40 @@ impl CssStyles {
             let selectors = css[cursor..open].trim();
             let body = &css[open + 1..close];
             let parsed = parse_css_body(body);
+            let parsed_gradient = parse_gradient_stops(body);
             for selector in selectors.split(',') {
                 let selector = selector.trim();
-                let Some(class_name) = selector.strip_prefix('.') else {
-                    continue;
-                };
-                let class_name = class_name.split_whitespace().next().unwrap_or("").trim();
-                if class_name.is_empty() {
-                    continue;
+                if let Some(class_name) = selector.strip_prefix('.') {
+                    let class_name = class_name.split_whitespace().next().unwrap_or("").trim();
+                    if class_name.is_empty() {
+                        continue;
+                    }
+                    let entry = rules.entry(class_name.to_string()).or_default();
+                    entry.merge(&parsed);
+                } else if let Some(id) = selector.strip_prefix('#') {
+                    let id = id.split_whitespace().next().unwrap_or("").trim();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    if let Some(stops) = parsed_gradient {
+                        gradient_stops.insert(id.to_string(), stops);
+                    }
                 }
-                let entry = rules.entry(class_name.to_string()).or_default();
-                entry.merge(&parsed);
             }
             cursor = close + 1;
         }
-        Self { rules }
+        Self {
+            rules,
+            gradient_stops,
+        }
     }
 
     fn get(&self, class_name: &str) -> CssRuleStyle {
         self.rules.get(class_name).cloned().unwrap_or_default()
+    }
+
+    fn gradient_stops(&self, id: &str, fallback: GradientStops) -> GradientStops {
+        self.gradient_stops.get(id).copied().unwrap_or(fallback)
     }
 }
 
@@ -2954,6 +3035,25 @@ fn parse_css_body(body: &str) -> CssRuleStyle {
         }
     }
     style
+}
+
+fn parse_gradient_stops(body: &str) -> Option<GradientStops> {
+    let mut start = None;
+    let mut stop = None;
+    for declaration in body.split(';') {
+        let Some((name, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        match name.trim() {
+            "--color-start" => start = parse_color(value.trim()),
+            "--color-stop" => stop = parse_color(value.trim()),
+            _ => {}
+        }
+    }
+    Some(GradientStops {
+        start: start?,
+        stop: stop?,
+    })
 }
 
 fn parse_font_families(value: &str) -> Option<Vec<String>> {
