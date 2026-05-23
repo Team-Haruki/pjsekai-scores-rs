@@ -78,10 +78,6 @@ struct Args {
     #[arg(long)]
     music_meta: Option<String>,
 
-    /// Approximate seconds per chart column
-    #[arg(long)]
-    target_segment_seconds: Option<f64>,
-
     /// JPEG quality for .jpg/.jpeg output (0-100)
     #[arg(long, default_value_t = 90, value_parser = parse_jpeg_quality)]
     jpeg_quality: u8,
@@ -141,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         custom_css,
         args.skill,
         music_meta,
-        args.target_segment_seconds,
+        None,
         args.generator,
     );
     drawing.set_note_asset_extension(args.note_asset_extension);

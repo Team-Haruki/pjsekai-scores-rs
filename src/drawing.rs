@@ -42,7 +42,6 @@ pub struct DrawingConfig {
     pub note_asset_extension: String,
     pub font_paths: Vec<String>,
     pub font_dirs: Vec<String>,
-    pub target_segment_seconds: f64,
     /// Generator name shown in the SVG subtitle (default: "HarukiBot NEO")
     pub generator: String,
 }
@@ -65,7 +64,6 @@ impl Default for DrawingConfig {
             note_asset_extension: "png".to_string(),
             font_paths: Vec::new(),
             font_dirs: Vec::new(),
-            target_segment_seconds: 8.0,
             generator: "HarukiBot NEO".to_string(),
         }
     }
@@ -106,15 +104,12 @@ impl Drawing {
         style_sheet: Option<String>,
         skill: bool,
         music_meta: Option<MusicMeta>,
-        target_segment_seconds: Option<f64>,
+        _target_segment_seconds: Option<f64>,
         generator: Option<String>,
     ) -> Self {
         let mut config = DrawingConfig::default();
         if let Some(nh) = note_host {
             config.note_host = nh;
-        }
-        if let Some(tss) = target_segment_seconds {
-            config.target_segment_seconds = tss;
         }
         if let Some(g) = generator {
             config.generator = g;
@@ -193,8 +188,6 @@ impl Drawing {
         // Now safe to borrow config immutably
         let cfg = &self.config;
 
-        // Segment the chart
-        let target_pixel_height = cfg.time_height * cfg.target_segment_seconds;
         let mut segments: Vec<(i32, i32)> = Vec::new(); // (bar_start, bar_stop)
         let mut bar_start = 0;
         let mut event = Event::new(Fraction::zero());
@@ -204,15 +197,13 @@ impl Drawing {
 
         for i in 0..=n_bars {
             let e = score.get_event(Fraction::from_integer(i as i64));
-            let current_height = cfg.time_height
-                * score.get_time_delta_f64(
-                    Fraction::from_integer(bar_start as i64),
-                    Fraction::from_integer(i as i64),
-                );
+            let current_sentence_length = e.sentence_length.unwrap_or(4);
+            let previous_sentence_length = event.sentence_length.unwrap_or(4);
 
             if bar_start != i
                 && (e.section != event.section
-                    || current_height >= target_pixel_height
+                    || current_sentence_length != previous_sentence_length
+                    || i == bar_start + previous_sentence_length
                     || i == n_bars)
             {
                 segments.push((bar_start, i));

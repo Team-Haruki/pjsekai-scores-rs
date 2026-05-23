@@ -223,7 +223,6 @@ impl Layout {
             .map(|&idx| score.notes[idx].bar().ceil() as i32)
             .unwrap_or(0);
 
-        let target_pixel_height = cfg.time_height * cfg.target_segment_seconds;
         let mut ranges: Vec<(i32, i32)> = Vec::new();
         let mut bar_start = 0;
         let mut event = Event::new(Fraction::zero());
@@ -233,15 +232,13 @@ impl Layout {
 
         for i in 0..=n_bars {
             let e = score.get_event(Fraction::from_integer(i as i64));
-            let current_height = cfg.time_height
-                * score.get_time_delta_f64(
-                    Fraction::from_integer(bar_start as i64),
-                    Fraction::from_integer(i as i64),
-                );
+            let current_sentence_length = e.sentence_length.unwrap_or(4);
+            let previous_sentence_length = event.sentence_length.unwrap_or(4);
 
             if bar_start != i
                 && (e.section != event.section
-                    || current_height >= target_pixel_height
+                    || current_sentence_length != previous_sentence_length
+                    || i == bar_start + previous_sentence_length
                     || i == n_bars)
             {
                 ranges.push((bar_start, i));

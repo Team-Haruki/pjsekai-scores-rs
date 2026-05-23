@@ -61,8 +61,6 @@ Options:
       --jacket <JACKET>          Jacket image URI/path shown in the chart footer
       --skill                    Render skill and fever overlay coverage
       --music-meta <MUSIC_META>  Music metadata JSON or JSON file path for skill score overlay
-      --target-segment-seconds <SECONDS>
-                                 Approximate seconds per chart column
       --jpeg-quality <JPEG_QUALITY>
                                  JPEG quality for .jpg/.jpeg output (0-100) [default: 90]
       --perf                     Print render/write timing statistics
@@ -114,7 +112,6 @@ pjsekai-scores-rs master.sus \
   --difficulty master \
   --play-level 26 \
   --music-id 1 \
-  --target-segment-seconds 8 \
   -o master.svg
 ```
 
@@ -340,7 +337,6 @@ drawing = scores.Drawing(
         "skill_score_solo": [0.10, 0.15, 0.20, 0.25],
         "skill_score_multi": [0.05, 0.10, 0.15, 0.20],
     },
-    target_segment_seconds=8.0,
     generator="MyBot v1.0",
     note_asset_extension="png",
     font_paths=[
@@ -389,7 +385,6 @@ svg = scores.score_to_svg(
     lyric_content=None,
     skill=False,
     music_meta=None,
-    target_segment_seconds=8.0,
     generator=None,
     note_asset_extension=None,
 )
@@ -398,7 +393,6 @@ png = scores.score_to_png(
     "chart.json",
     note_host="/path/to/notes",
     style_sheet="",
-    target_segment_seconds=8.0,
     font_paths=[
         "/path/to/SourceHanSansSC-Regular.otf",
         "/path/to/FOT-RodinNTLGPro-DB.otf",
@@ -409,7 +403,6 @@ jpg = scores.score_to_jpg(
     "chart.json",
     note_host="/path/to/notes",
     style_sheet="",
-    target_segment_seconds=8.0,
     jpeg_quality=90,
 )
 
