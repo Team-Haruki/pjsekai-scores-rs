@@ -10,10 +10,11 @@ use crate::notes::directional::{Directional, DirectionalType};
 use crate::notes::event::Event;
 use crate::notes::slide::{Slide, SlideType};
 use crate::notes::tap::{Tap, TapType};
-use crate::notes::{NoteBase, NoteData};
+use crate::notes::{NO_NOTE, NoteBase, NoteData, NoteIdx};
 use crate::score::Score;
 
-const TICKS_PER_BEAT: i64 = 480;
+const DEFAULT_TICKS_PER_BEAT: i64 = 480;
+const DEFAULT_BEATS_PER_MEASURE: f64 = 4.0;
 
 #[derive(Debug)]
 pub enum ScoreJsonError {
@@ -47,9 +48,9 @@ impl From<serde_json::Error> for ScoreJsonError {
 
 #[derive(Clone, Copy)]
 struct TickSegment {
-    ticks: i64,
+    tick: i64,
     bar: Fraction,
-    bar_length: Fraction,
+    tick_length: i64,
 }
 
 struct TickConverter {
@@ -57,61 +58,181 @@ struct TickConverter {
 }
 
 impl TickConverter {
-    fn new(events: &[Value]) -> Self {
-        let mut converter = TickConverter {
-            segments: vec![TickSegment {
-                ticks: 0,
-                bar: Fraction::zero(),
-                bar_length: Fraction::from_integer(4),
-            }],
-        };
+    fn new(events: &[Value], ticks_per_beat: i64) -> Self {
+        let default_tick_length = ticks_per_beat * DEFAULT_BEATS_PER_MEASURE as i64;
+        let mut segments = vec![TickSegment {
+            tick: 0,
+            bar: Fraction::zero(),
+            tick_length: default_tick_length,
+        }];
 
-        let mut sorted: Vec<&Value> = events.iter().collect();
-        sorted.sort_by_key(|event| {
-            (
-                i64_field(event, "ticks").unwrap_or(0),
-                i64_field(event, "id").unwrap_or(0),
-            )
-        });
+        let mut current_tick = 0;
+        let mut current_bar = Fraction::zero();
+        let mut current_tick_length = default_tick_length;
 
-        for event in sorted {
-            if i64_field(event, "eventType") != Some(3) {
+        let mut signature_events: Vec<&Value> = events
+            .iter()
+            .filter(|event| int_field(event, "eventType", -1) == 3)
+            .collect();
+        signature_events
+            .sort_by_key(|event| (int_field(event, "ticks", 0), int_field(event, "id", 0)));
+
+        for event in signature_events {
+            let tick = int_field(event, "ticks", 0);
+            if tick < current_tick {
                 continue;
             }
 
-            let ticks = i64_field(event, "ticks").unwrap_or(0);
-            let bar_length = parse_bar_length(event.get("changeValue"));
-            let bar = converter.to_bar(ticks);
+            current_bar =
+                current_bar + Fraction::new(tick - current_tick, current_tick_length.max(1));
+            current_tick = tick;
+            current_tick_length =
+                time_signature_to_tick_length(event.get("changeValue"), ticks_per_beat);
 
-            if let Some(last) = converter.segments.last_mut()
-                && last.ticks == ticks
+            if let Some(last) = segments.last_mut()
+                && last.tick == tick
             {
-                *last = TickSegment {
-                    ticks,
-                    bar,
-                    bar_length,
-                };
+                last.bar = current_bar;
+                last.tick_length = current_tick_length;
                 continue;
             }
 
-            converter.segments.push(TickSegment {
-                ticks,
-                bar,
-                bar_length,
+            segments.push(TickSegment {
+                tick,
+                bar: current_bar,
+                tick_length: current_tick_length,
             });
         }
 
-        converter
+        Self { segments }
     }
 
     fn to_bar(&self, ticks: i64) -> Fraction {
         let index = self
             .segments
-            .partition_point(|segment| segment.ticks <= ticks)
+            .partition_point(|segment| segment.tick <= ticks)
             .saturating_sub(1);
         let segment = self.segments[index];
-        let ticks_per_bar = Fraction::from_integer(TICKS_PER_BEAT) * segment.bar_length;
-        segment.bar + Fraction::from_integer(ticks - segment.ticks) / ticks_per_bar
+        segment.bar + Fraction::new(ticks - segment.tick, segment.tick_length.max(1))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RawNote {
+    id: i64,
+    ticks: i64,
+    lane_start: i32,
+    lane_end: i32,
+    category: i32,
+    note_base_type: i32,
+    previous_connection_id: i64,
+    next_connection_id: i64,
+    direction: i32,
+    note_line_type: i32,
+    speed_ratio: f64,
+    critical: bool,
+    is_skip_false: bool,
+}
+
+type NoteSlotKey = (i64, i32, i32);
+type TapSlotKey = (i64, i32);
+
+struct JsonNoteBuilder<'a> {
+    tick_converter: &'a TickConverter,
+    notes: Vec<NoteData>,
+    active_notes: Vec<NoteIdx>,
+}
+
+impl<'a> JsonNoteBuilder<'a> {
+    fn new(tick_converter: &'a TickConverter) -> Self {
+        Self {
+            tick_converter,
+            notes: Vec::new(),
+            active_notes: Vec::new(),
+        }
+    }
+
+    fn finish(mut self) -> (Vec<NoteData>, Vec<NoteIdx>) {
+        self.active_notes.sort_by(|&left, &right| {
+            let left_note = &self.notes[left];
+            let right_note = &self.notes[right];
+            left_note
+                .bar()
+                .cmp(&right_note.bar())
+                .then(left_note.lane().cmp(&right_note.lane()))
+        });
+        (self.notes, self.active_notes)
+    }
+
+    fn push_active(&mut self, note: NoteData) -> NoteIdx {
+        let idx = self.notes.len();
+        self.notes.push(note);
+        self.active_notes.push(idx);
+        idx
+    }
+
+    fn push_attached(&mut self, note: NoteData) -> NoteIdx {
+        let idx = self.notes.len();
+        self.notes.push(note);
+        idx
+    }
+
+    fn make_base(&self, note: &RawNote, lane_note: &RawNote, note_type: i32) -> NoteBase {
+        let mut base = NoteBase::new(
+            self.tick_converter.to_bar(note.ticks),
+            note_lane(lane_note),
+            note_width(lane_note),
+            note_type,
+        );
+        base.speed = note_speed_ratio(note);
+        base
+    }
+
+    fn make_tap(&self, note: &RawNote, lane_note: &RawNote, tap_type: i32) -> NoteData {
+        NoteData::Tap(self.make_base(note, lane_note, tap_type), Tap)
+    }
+
+    fn make_directional(
+        &self,
+        note: &RawNote,
+        lane_note: &RawNote,
+        directional_type: i32,
+        tap_idx: NoteIdx,
+    ) -> NoteData {
+        NoteData::Directional(
+            self.make_base(note, lane_note, directional_type),
+            Directional { tap_idx },
+        )
+    }
+
+    fn make_slide(
+        &self,
+        note: &RawNote,
+        lane_note: &RawNote,
+        slide_type: i32,
+        channel: i32,
+        decoration: bool,
+    ) -> NoteData {
+        NoteData::Slide(
+            self.make_base(note, lane_note, slide_type),
+            Slide::new(channel, decoration),
+        )
+    }
+
+    fn push_attached_tap(&mut self, note: &RawNote, lane_note: &RawNote, tap_type: i32) -> NoteIdx {
+        let tap = self.make_tap(note, lane_note, tap_type);
+        self.push_attached(tap)
+    }
+
+    fn push_attached_directional(
+        &mut self,
+        note: &RawNote,
+        lane_note: &RawNote,
+        directional_type: i32,
+        tap_idx: NoteIdx,
+    ) -> NoteIdx {
+        let directional = self.make_directional(note, lane_note, directional_type, tap_idx);
+        self.push_attached(directional)
     }
 }
 
@@ -129,367 +250,554 @@ pub fn score_from_value(data: &Value) -> Result<Score, ScoreJsonError> {
 
     let event_data = array_field(chart, "MusicScoreEventDataList");
     let note_data = array_field(chart, "NoteList");
-    let tick_converter = TickConverter::new(event_data);
+    let ticks_per_beat = int_field(data, "ticksPerBeat", DEFAULT_TICKS_PER_BEAT).max(1);
+    let tick_converter = TickConverter::new(event_data, ticks_per_beat);
 
     let mut score = Score::new();
-    score.meta = parse_meta(data);
+    score.meta = parse_meta(data, chart);
     init_events_by_data(&mut score, event_data, &tick_converter);
-    merge_events_by_bar(&mut score);
-    init_notes_by_data(&mut score, note_data, &tick_converter);
-    score.init_notes();
+    merge_json_events_by_bar(&mut score);
+
+    let (notes, active_notes) = parse_notes(note_data, &tick_converter);
+    score.notes = notes;
+    score.active_notes = active_notes;
     score.init_events();
 
     Ok(score)
 }
 
 fn init_events_by_data(score: &mut Score, events: &[Value], tick_converter: &TickConverter) {
-    for event in events {
-        let bar = tick_converter.to_bar(i64_field(event, "ticks").unwrap_or(0));
-        match i64_field(event, "eventType") {
-            Some(0) => {
-                if let Some(bpm) = fraction_value(event.get("changeValue")) {
-                    score.events.push(Event::new(bar).with_bpm(bpm));
+    let mut sorted: Vec<&Value> = events.iter().collect();
+    sorted.sort_by_key(|event| {
+        (
+            int_field(event, "ticks", 0),
+            int_field(event, "eventType", -1),
+        )
+    });
+
+    for event in sorted {
+        let bar = tick_converter.to_bar(int_field(event, "ticks", 0));
+        match int_field(event, "eventType", -1) {
+            0 => score
+                .events
+                .push(Event::new(bar).with_bpm(Fraction::from_f64(float_field(
+                    event,
+                    "changeValue",
+                    120.0,
+                )))),
+            1 => score.events.push(Event::new(bar).with_speed(float_field(
+                event,
+                "changeValue",
+                1.0,
+            ))),
+            2 => {}
+            3 => score.events.push(
+                Event::new(bar)
+                    .with_bar_length(time_signature_to_bar_length(event.get("changeValue"))),
+            ),
+            _ => {}
+        }
+    }
+}
+
+fn parse_notes(
+    note_data: &[Value],
+    tick_converter: &TickConverter,
+) -> (Vec<NoteData>, Vec<NoteIdx>) {
+    let mut raw_notes: Vec<RawNote> = note_data.iter().map(read_note).collect();
+    raw_notes.sort_by(|left, right| {
+        left.ticks
+            .cmp(&right.ticks)
+            .then(left.lane_start.cmp(&right.lane_start))
+            .then(left.id.cmp(&right.id))
+    });
+
+    let (chains, connected_ids) = build_chains(&raw_notes);
+    let mut connected_slide_slots = HashSet::new();
+    let mut critical_slide_slots = HashSet::new();
+    let mut hidden_head_slide_slots = HashSet::new();
+    let mut standalone_tap_slots = HashSet::new();
+    let mut occupied_tap_slots = HashSet::new();
+
+    for chain in &chains {
+        for &note_index in chain {
+            connected_slide_slots.insert(note_slot_key(&raw_notes[note_index]));
+        }
+    }
+
+    for raw_chain in &chains {
+        let chain = remove_adjacent_visible_relay_duplicates(&raw_notes, raw_chain);
+        let visible_relay_as_attachment = chain_has_curve_line(&raw_notes, &chain);
+        for (index, &note_index) in chain.iter().enumerate() {
+            let note = &raw_notes[note_index];
+            let slide_type = get_slide_type(note, index + 1 == chain.len());
+            if !is_visible_relay_attachment(note)
+                && connected_note_adds_tap(note, slide_type, visible_relay_as_attachment)
+            {
+                reserve_tap_slot(&mut occupied_tap_slots, note);
+            }
+        }
+    }
+
+    for note in &raw_notes {
+        if !connected_ids.contains(&note.id) {
+            reserve_tap_slot(&mut occupied_tap_slots, note);
+            standalone_tap_slots.insert(note_slot_key(note));
+        }
+    }
+
+    for chain in &chains {
+        if is_hidden_head_slide_chain(&raw_notes, chain, &standalone_tap_slots) {
+            hidden_head_slide_slots.insert(note_slot_key(&raw_notes[chain[0]]));
+        }
+    }
+
+    let mut builder = JsonNoteBuilder::new(tick_converter);
+    let mut channel_available_at = [f64::NEG_INFINITY; 36];
+
+    for raw_chain in &chains {
+        let chain = remove_adjacent_visible_relay_duplicates(&raw_notes, raw_chain);
+        if chain.is_empty() {
+            continue;
+        }
+
+        let start_tick = raw_notes[chain[0]].ticks as f64;
+        let end_tick = raw_notes[*chain.last().unwrap()].ticks as f64;
+        let channel = match channel_available_at
+            .iter()
+            .position(|&available_at| available_at < start_tick)
+        {
+            Some(index) => index,
+            None => channel_available_at
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| left.total_cmp(right))
+                .map(|(index, _)| index)
+                .unwrap_or(0),
+        };
+        channel_available_at[channel] = channel_available_at[channel].max(end_tick);
+
+        let chain_decoration = is_decoration_slide_chain(&raw_notes, &chain);
+        let visible_relay_as_attachment = chain_has_curve_line(&raw_notes, &chain);
+        let is_hidden_head = is_hidden_head_slide_chain(&raw_notes, &chain, &standalone_tap_slots);
+        let mut previous_slide = NO_NOTE;
+        let mut head_slide = NO_NOTE;
+        let mut deferred_critical_taps = Vec::new();
+
+        for (index, &note_index) in chain.iter().enumerate() {
+            let note = &raw_notes[note_index];
+            let base = note.note_base_type;
+            let decoration = chain_decoration || is_decoration_slide_note(note);
+            let slide_type = get_slide_type(note, index + 1 == chain.len());
+            let output_note =
+                if slide_type == SlideType::Relay as i32 && is_visible_relay_attachment(note) {
+                    with_visible_relay_attachment_slot(note, &mut occupied_tap_slots)
+                } else {
+                    note.clone()
+                };
+
+            let slide =
+                builder.make_slide(note, &output_note, slide_type, channel as i32, decoration);
+            let slide_idx = builder.push_active(slide);
+
+            if head_slide == NO_NOTE {
+                head_slide = slide_idx;
+            }
+            if let Some(slide) = builder.notes[slide_idx].as_slide_mut() {
+                slide.head_idx = head_slide;
+            }
+            if previous_slide != NO_NOTE {
+                if let Some(previous) = builder.notes[previous_slide].as_slide_mut() {
+                    previous.next_idx = slide_idx;
                 }
             }
-            Some(3) => {
-                score.events.push(
-                    Event::new(bar).with_bar_length(parse_bar_length(event.get("changeValue"))),
-                );
-            }
-            Some(1) | Some(2) => {}
-            _ => {}
-        }
-    }
-}
 
-fn init_notes_by_data(score: &mut Score, notes: &[Value], tick_converter: &TickConverter) {
-    let mut notes_by_id: HashMap<i64, &Value> = HashMap::new();
-    for note in notes {
-        if let Some(id) = i64_field(note, "id") {
-            notes_by_id.insert(id, note);
-        }
-    }
-
-    let mut sorted: Vec<&Value> = notes.iter().collect();
-    sorted.sort_by_key(|note| {
-        (
-            i64_field(note, "ticks").unwrap_or(0),
-            i64_field(note, "id").unwrap_or(0),
-        )
-    });
-
-    let mut handled_ids: HashSet<i64> = HashSet::new();
-    let mut channel = 0;
-
-    for note in sorted {
-        let Some(id) = i64_field(note, "id") else {
-            continue;
-        };
-        if handled_ids.contains(&id) {
-            continue;
-        }
-
-        if is_chain_start(note) {
-            channel += 1;
-            append_chain(
-                score,
+            attach_connected_note(
+                &mut builder,
+                slide_idx,
                 note,
-                &notes_by_id,
-                &mut handled_ids,
-                tick_converter,
-                channel,
+                &output_note,
+                is_hidden_head && index == 0 && (base == 9 || base == 12),
+                &mut deferred_critical_taps,
+                &mut critical_slide_slots,
             );
-        } else {
-            handled_ids.insert(id);
-            append_note(score, note, tick_converter, 0);
+
+            previous_slide = slide_idx;
         }
+
+        for note in deferred_critical_taps {
+            if !standalone_tap_slots.contains(&note_slot_key(&note)) {
+                let tap = builder.make_tap(&note, &note, TapType::CriticalCancel as i32);
+                builder.push_active(tap);
+            }
+        }
+
+        let _ = visible_relay_as_attachment;
+    }
+
+    for note in &raw_notes {
+        if !connected_ids.contains(&note.id) {
+            add_standalone_note(
+                &mut builder,
+                note,
+                &connected_slide_slots,
+                &critical_slide_slots,
+                &hidden_head_slide_slots,
+            );
+        }
+    }
+
+    builder.finish()
+}
+
+fn read_note(js: &Value) -> RawNote {
+    RawNote {
+        id: int_field(js, "id", 0),
+        ticks: int_field(js, "ticks", 0),
+        lane_start: int_field(js, "laneStart", 0) as i32,
+        lane_end: int_field(js, "laneEnd", 0) as i32,
+        category: int_field(js, "category", 0) as i32,
+        note_base_type: int_field(js, "noteBaseType", 0) as i32,
+        previous_connection_id: int_field(js, "previousConnectionId", -1),
+        next_connection_id: int_field(js, "nextConnectionId", -1),
+        direction: int_field(js, "direction", 0) as i32,
+        note_line_type: int_field(js, "noteLineType", 0) as i32,
+        speed_ratio: sanitize_speed_ratio(float_field(js, "speedRatio", 1.0)),
+        critical: truthy_field(js, "type"),
+        is_skip_false: matches!(js.get("isSkip"), Some(Value::Bool(false))),
     }
 }
 
-fn append_chain(
-    score: &mut Score,
-    first: &Value,
-    notes_by_id: &HashMap<i64, &Value>,
-    handled_ids: &mut HashSet<i64>,
-    tick_converter: &TickConverter,
-    channel: i32,
+fn build_chains(notes: &[RawNote]) -> (Vec<Vec<usize>>, HashSet<i64>) {
+    let by_id: HashMap<i64, usize> = notes
+        .iter()
+        .enumerate()
+        .map(|(index, note)| (note.id, index))
+        .collect();
+    let mut visited = HashSet::new();
+    let mut chains = Vec::new();
+
+    for (index, note) in notes.iter().enumerate() {
+        if visited.contains(&note.id) {
+            continue;
+        }
+        if note.next_connection_id == -1 && note.previous_connection_id == -1 {
+            continue;
+        }
+        if note.previous_connection_id != -1 {
+            continue;
+        }
+
+        let mut chain = Vec::new();
+        let mut current = Some(index);
+        while let Some(current_index) = current {
+            let current_note = &notes[current_index];
+            if visited.contains(&current_note.id) {
+                break;
+            }
+
+            chain.push(current_index);
+            visited.insert(current_note.id);
+            current = if current_note.next_connection_id == -1 {
+                None
+            } else {
+                by_id.get(&current_note.next_connection_id).copied()
+            };
+        }
+        if !chain.is_empty() {
+            chains.push(chain);
+        }
+    }
+
+    for (index, note) in notes.iter().enumerate() {
+        if !visited.contains(&note.id)
+            && (note.next_connection_id != -1 || note.previous_connection_id != -1)
+        {
+            chains.push(vec![index]);
+            visited.insert(note.id);
+        }
+    }
+
+    (chains, visited)
+}
+
+fn add_standalone_note(
+    builder: &mut JsonNoteBuilder<'_>,
+    note: &RawNote,
+    connected_slide_slots: &HashSet<NoteSlotKey>,
+    critical_slide_slots: &HashSet<NoteSlotKey>,
+    hidden_head_slide_slots: &HashSet<NoteSlotKey>,
 ) {
-    let mut seen: HashSet<i64> = HashSet::new();
-    let mut note = Some(first);
-
-    while let Some(current) = note {
-        let Some(id) = i64_field(current, "id") else {
-            break;
-        };
-        if !seen.insert(id) {
-            break;
-        }
-
-        handled_ids.insert(id);
-        append_note(score, current, tick_converter, channel);
-
-        let next_id = i64_field(current, "nextConnectionId").unwrap_or(-1);
-        note = if next_id == -1 {
-            None
-        } else {
-            notes_by_id.get(&next_id).copied()
-        };
-    }
-}
-
-fn append_note(score: &mut Score, note: &Value, tick_converter: &TickConverter, channel: i32) {
-    let bar = tick_converter.to_bar(i64_field(note, "ticks").unwrap_or(0));
-    let lane = lane(note);
-    let width = width(note);
-    let critical = i64_field(note, "type") == Some(1);
-    let category = i64_field(note, "category");
-
-    if channel != 0 {
-        score.notes.extend(make_slide_notes(
+    if note.note_base_type == 3 || note.category == 3 {
+        let tap_type = standalone_tap_type(
             note,
-            bar,
-            lane,
-            width,
-            critical,
-            channel,
-            is_decoration_slide(note),
-        ));
-    } else {
-        match category {
-            Some(0) => {
-                score
-                    .notes
-                    .push(tap_note(bar, lane, width, tap_type(critical, false, false)))
-            }
-            Some(3) => append_directional(score, bar, lane, width, critical, false, note),
-            Some(4) => {
-                score
-                    .notes
-                    .push(tap_note(bar, lane, width, tap_type(critical, true, false)))
-            }
-            Some(8) => append_directional(score, bar, lane, width, critical, true, note),
-            _ => {}
-        }
+            connected_slide_slots,
+            critical_slide_slots,
+            hidden_head_slide_slots,
+        );
+        let tap_idx = builder.push_attached_tap(note, note, tap_type);
+        let directional = builder.make_directional(
+            note,
+            note,
+            direction_to_directional(note.direction),
+            tap_idx,
+        );
+        builder.push_active(directional);
+        return;
     }
+
+    if note.note_base_type == 4 || note.category == 8 {
+        let tap_type = tap_type_from_json(note, TapType::Tap as i32);
+        if matches!(note.direction, 1 | 2)
+            || tap_type == TapType::Trend as i32
+            || tap_type == TapType::CriticalTrend as i32
+        {
+            let tap_idx = builder.push_attached_tap(note, note, tap_type);
+            let directional = builder.make_directional(
+                note,
+                note,
+                direction_to_directional(note.direction),
+                tap_idx,
+            );
+            builder.push_active(directional);
+        } else {
+            let tap = builder.make_tap(note, note, tap_type);
+            builder.push_active(tap);
+        }
+        return;
+    }
+
+    let tap_type = standalone_tap_type(
+        note,
+        connected_slide_slots,
+        critical_slide_slots,
+        hidden_head_slide_slots,
+    );
+    let tap = builder.make_tap(note, note, tap_type);
+    builder.push_active(tap);
 }
 
-fn append_directional(
-    score: &mut Score,
-    bar: Fraction,
-    lane: i32,
-    width: i32,
-    critical: bool,
-    trend: bool,
-    note: &Value,
+fn attach_connected_note(
+    builder: &mut JsonNoteBuilder<'_>,
+    slide_idx: NoteIdx,
+    note: &RawNote,
+    output_note: &RawNote,
+    is_hidden_head_start: bool,
+    deferred_critical_taps: &mut Vec<RawNote>,
+    critical_slide_slots: &mut HashSet<NoteSlotKey>,
 ) {
-    score
-        .notes
-        .push(tap_note(bar, lane, width, tap_type(critical, trend, false)));
-    score.notes.push(directional_note(
-        bar,
-        lane,
-        width,
-        directional_type(i64_field(note, "direction").unwrap_or(0)),
-    ));
-}
+    let base = note.note_base_type;
+    let (slide_type, decoration) = match &builder.notes[slide_idx] {
+        NoteData::Slide(base, slide) => (base.note_type, slide.decoration),
+        _ => return,
+    };
 
-fn make_slide_notes(
-    note: &Value,
-    bar: Fraction,
-    lane: i32,
-    width: i32,
-    critical: bool,
-    channel: i32,
-    decoration: bool,
-) -> Vec<NoteData> {
-    let mut notes = endpoint_notes(note, bar, lane, width, critical);
+    let mut tap_idx = NO_NOTE;
+    let mut directional_idx = NO_NOTE;
 
-    if let Some(line_directional) = line_directional(note, bar, lane, width) {
-        notes.push(line_directional);
-    }
-
-    let slide = slide_note(bar, lane, width, slide_type(note), channel, decoration);
-
-    if slide_type(note) == SlideType::Relay as i32 && bool_field(note, "isSkip") {
-        if !notes.iter().any(NoteData::is_tap) {
-            notes.push(tap_note(bar, lane, width, tap_type(critical, false, false)));
+    if decoration && note.critical && (base == 10 || base == 13) {
+        tap_idx = builder.push_attached_tap(note, output_note, TapType::CriticalCancel as i32);
+        deferred_critical_taps.push(output_note.clone());
+        critical_slide_slots.insert(note_slot_key(output_note));
+    } else if is_hidden_head_start && (base == 9 || base == 12) {
+        tap_idx = builder.push_attached_tap(
+            note,
+            output_note,
+            if note.critical {
+                TapType::CriticalCancel as i32
+            } else {
+                TapType::Cancel as i32
+            },
+        );
+    } else if slide_type == SlideType::Relay as i32 && is_visible_relay_attachment(note) {
+        tap_idx = builder.push_attached_tap(note, output_note, TapType::Flick as i32);
+    } else if base == 3 || note.category == 3 {
+        if note.critical {
+            tap_idx = builder.push_attached_tap(note, output_note, TapType::Critical as i32);
         }
-        notes.push(slide);
-        return notes;
+        directional_idx = builder.push_attached_directional(
+            note,
+            output_note,
+            direction_to_directional(note.direction),
+            tap_idx,
+        );
+    } else if matches!(base, 8 | 11 | 9 | 12) {
+        tap_idx = builder.push_attached_tap(
+            note,
+            output_note,
+            tap_type_from_json(note, TapType::Tap as i32),
+        );
+    } else if note.critical && (base == 1 || base == 2) {
+        tap_idx = builder.push_attached_tap(note, output_note, TapType::Critical as i32);
     }
 
-    notes.push(slide);
-    notes
-}
+    let line_directional_type = line_type_to_directional(note.note_line_type);
+    if line_directional_type != 0 {
+        directional_idx =
+            builder.push_attached_directional(note, output_note, line_directional_type, tap_idx);
+    }
 
-fn endpoint_notes(
-    note: &Value,
-    bar: Fraction,
-    lane: i32,
-    width: i32,
-    critical: bool,
-) -> Vec<NoteData> {
-    let category = i64_field(note, "category");
-    let note_base_type = i64_field(note, "noteBaseType");
-
-    match note_base_type {
-        Some(1) | Some(2) => {
-            return vec![tap_note(bar, lane, width, tap_type(critical, false, false))];
+    if let Some(slide) = builder.notes[slide_idx].as_slide_mut() {
+        if tap_idx != NO_NOTE {
+            slide.tap_idx = tap_idx;
         }
-        Some(3) => {
-            return vec![
-                tap_note(bar, lane, width, tap_type(critical, false, false)),
-                directional_note(
-                    bar,
-                    lane,
-                    width,
-                    directional_type(i64_field(note, "direction").unwrap_or(0)),
-                ),
-            ];
+        if directional_idx != NO_NOTE {
+            slide.directional_idx = directional_idx;
         }
-        Some(9) | Some(11) => {
-            return vec![tap_note(bar, lane, width, tap_type(critical, true, false))];
+    }
+}
+
+fn remove_adjacent_visible_relay_duplicates(notes: &[RawNote], chain: &[usize]) -> Vec<usize> {
+    let mut filtered = Vec::with_capacity(chain.len());
+    for (index, &note_index) in chain.iter().enumerate() {
+        let note = &notes[note_index];
+        let next = chain.get(index + 1).map(|&next_index| &notes[next_index]);
+        if let Some(next) = next
+            && is_visible_relay_slide_note(note)
+            && is_visible_relay_slide_note(next)
+            && (next.ticks - note.ticks).abs() <= 1
+        {
+            continue;
         }
-        Some(4) => {
-            return vec![
-                tap_note(bar, lane, width, tap_type(critical, true, false)),
-                directional_note(
-                    bar,
-                    lane,
-                    width,
-                    directional_type(i64_field(note, "direction").unwrap_or(0)),
-                ),
-            ];
-        }
-        Some(12) => {
-            return vec![tap_note(bar, lane, width, tap_type(critical, false, true))];
-        }
-        Some(5) | Some(6) | Some(10) | Some(13) | Some(14) => return Vec::new(),
-        _ => {}
+        filtered.push(note_index);
+    }
+    filtered
+}
+
+fn with_visible_relay_attachment_slot(
+    note: &RawNote,
+    occupied_tap_slots: &mut HashSet<TapSlotKey>,
+) -> RawNote {
+    if !occupied_tap_slots.contains(&tap_slot_key(note)) {
+        occupied_tap_slots.insert(tap_slot_key(note));
+        return note.clone();
     }
 
-    match category {
-        Some(0) | Some(1) => vec![tap_note(bar, lane, width, tap_type(critical, false, false))],
-        Some(3) | Some(8) => {
-            let trend = category == Some(8);
-            vec![
-                tap_note(bar, lane, width, tap_type(critical, trend, false)),
-                directional_note(
-                    bar,
-                    lane,
-                    width,
-                    directional_type(i64_field(note, "direction").unwrap_or(0)),
-                ),
-            ]
-        }
-        Some(4) | Some(7) => vec![tap_note(bar, lane, width, tap_type(critical, true, false))],
-        Some(5) => vec![tap_note(bar, lane, width, tap_type(critical, false, true))],
-        _ => Vec::new(),
-    }
+    let width = note_width(note);
+    let max_lane_start = (12 - width).max(0);
+    let mut candidates: Vec<i32> = (0..=max_lane_start).collect();
+    candidates.sort_by_key(|candidate| (*candidate - note.lane_start).abs());
+
+    let lane_start = candidates
+        .into_iter()
+        .find(|candidate| !occupied_tap_slots.contains(&(note.ticks, candidate + 2)));
+    let Some(lane_start) = lane_start else {
+        return note.clone();
+    };
+
+    let mut placed = note.clone();
+    placed.lane_start = lane_start;
+    placed.lane_end = lane_start + width - 1;
+    occupied_tap_slots.insert(tap_slot_key(&placed));
+    placed
 }
 
-fn parse_meta(data: &Value) -> Meta {
-    let mut meta = Meta::new();
-    meta.title = custom_info_string(data, "title").or_else(|| string_field(data, "title"));
-    meta.difficulty = string_field(data, "musicDifficultyType");
-    meta.playlevel = string_field(data, "playLevel");
-    meta.songid = string_field(data, "musicId");
-    meta
+fn reserve_tap_slot(occupied_tap_slots: &mut HashSet<TapSlotKey>, note: &RawNote) {
+    occupied_tap_slots.insert(tap_slot_key(note));
 }
 
-fn merge_events_by_bar(score: &mut Score) {
-    let mut merged: BTreeMap<Fraction, Event> = BTreeMap::new();
-    let mut events = std::mem::take(&mut score.events);
-    events.sort_by(|a, b| {
-        a.bar
-            .partial_cmp(&b.bar)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    for event in events {
-        merged
-            .entry(event.bar)
-            .and_modify(|existing| *existing = existing.merge(&event))
-            .or_insert(event);
-    }
-
-    score.events = merged.into_values().collect();
-}
-
-fn parse_bar_length(value: Option<&Value>) -> Fraction {
-    if let Some(Value::String(s)) = value
-        && let Some((numerator, denominator)) = s.split_once('/')
-        && let (Ok(numerator), Ok(denominator)) = (
-            numerator.trim().parse::<i64>(),
-            denominator.trim().parse::<i64>(),
-        )
-    {
-        return Fraction::new(numerator * 4, denominator);
-    }
-
-    fraction_value(value).unwrap_or_else(|| Fraction::from_integer(4))
-}
-
-fn fraction_value(value: Option<&Value>) -> Option<Fraction> {
-    match value? {
-        Value::Number(n) => n
-            .as_i64()
-            .map(Fraction::from_integer)
-            .or_else(|| n.as_f64().map(Fraction::from_f64)),
-        Value::String(s) => Fraction::parse(s),
-        _ => None,
-    }
-}
-
-fn lane(note: &Value) -> i32 {
-    i64_field(note, "laneStart").unwrap_or(0) as i32 + 2
-}
-
-fn width(note: &Value) -> i32 {
-    let start = i64_field(note, "laneStart").unwrap_or(0);
-    let end = i64_field(note, "laneEnd").unwrap_or(0);
-    (end - start + 1).max(1) as i32
-}
-
-fn is_chain_start(note: &Value) -> bool {
-    i64_field(note, "previousConnectionId") == Some(-1)
-        && i64_field(note, "nextConnectionId").unwrap_or(-1) != -1
-}
-
-fn is_decoration_slide(note: &Value) -> bool {
-    matches!(i64_field(note, "category"), Some(9..=11))
-        || matches!(i64_field(note, "noteBaseType"), Some(10 | 13 | 14))
-}
-
-fn slide_type(note: &Value) -> i32 {
-    if bool_field(note, "IsConnectedFirst") || bool_field(note, "isConnectedFirst") {
-        return SlideType::Start as i32;
-    }
-
-    if bool_field(note, "IsConnectedLast") || bool_field(note, "isConnectedLast") {
+fn get_slide_type(note: &RawNote, is_last: bool) -> i32 {
+    let base = note.note_base_type;
+    if is_last {
         return SlideType::End as i32;
     }
-
-    if i64_field(note, "category") == Some(13) {
+    if matches!(base, 2 | 8 | 9 | 10) {
+        return SlideType::Start as i32;
+    }
+    if matches!(base, 1 | 3 | 11 | 12 | 13) {
+        return SlideType::End as i32;
+    }
+    if base == 6 || base == 14 || note.category == 11 {
         return SlideType::Invisible as i32;
     }
-
     SlideType::Relay as i32
 }
 
-fn tap_type(critical: bool, trend: bool, cancel: bool) -> i32 {
-    match (critical, trend, cancel) {
-        (true, true, false) => TapType::CriticalTrend as i32,
-        (false, true, false) => TapType::Trend as i32,
-        (true, false, true) => TapType::CriticalCancel as i32,
-        (false, false, true) => TapType::Cancel as i32,
-        (true, false, false) => TapType::Critical as i32,
-        (false, false, false) => TapType::Tap as i32,
-        (_, true, true) => TapType::Cancel as i32,
+fn connected_note_adds_tap(
+    note: &RawNote,
+    slide_type: i32,
+    visible_relay_as_attachment: bool,
+) -> bool {
+    let base = note.note_base_type;
+    (slide_type == SlideType::Relay as i32
+        && visible_relay_as_attachment
+        && is_visible_relay_slide_note(note))
+        || base == 3
+        || note.category == 3
+        || base == 8
+        || base == 11
+        || base == 9
+        || base == 12
+        || (note.critical && (base == 1 || base == 2))
+}
+
+fn standalone_tap_type(
+    note: &RawNote,
+    connected_slide_slots: &HashSet<NoteSlotKey>,
+    _critical_slide_slots: &HashSet<NoteSlotKey>,
+    hidden_head_slide_slots: &HashSet<NoteSlotKey>,
+) -> i32 {
+    let tap_type = tap_type_from_json(note, TapType::Tap as i32);
+    if tap_type == TapType::Trend as i32 || tap_type == TapType::CriticalTrend as i32 {
+        return tap_type;
+    }
+    if hidden_head_slide_slots.contains(&note_slot_key(note)) {
+        return tap_type;
+    }
+    if connected_slide_slots.contains(&note_slot_key(note)) {
+        return downgrade_critical_tap_type(tap_type);
+    }
+    tap_type
+}
+
+fn tap_type_from_json(note: &RawNote, fallback: i32) -> i32 {
+    let base = note.note_base_type;
+    let category = note.category;
+    if category == 6 {
+        return critical_pair(note.critical, TapType::CriticalTrend, TapType::Trend);
+    }
+    if base == 11 {
+        return critical_pair(note.critical, TapType::CriticalTrend, TapType::Trend);
+    }
+    if base == 8 {
+        return critical_pair(note.critical, TapType::Critical, TapType::Tap);
+    }
+    if base == 9 || base == 12 {
+        return critical_pair(note.critical, TapType::CriticalCancel, TapType::Cancel);
+    }
+    if base == 4 {
+        return critical_pair(note.critical, TapType::CriticalTrend, TapType::Trend);
+    }
+    if base == 3 {
+        return critical_pair(note.critical, TapType::Critical, TapType::Tap);
+    }
+    if base == 1 || base == 2 {
+        return critical_pair(note.critical, TapType::Critical, TapType::Tap);
+    }
+    fallback
+}
+
+fn critical_pair(critical: bool, critical_type: TapType, normal_type: TapType) -> i32 {
+    if critical {
+        critical_type as i32
+    } else {
+        normal_type as i32
     }
 }
 
-fn directional_type(direction: i64) -> i32 {
+fn downgrade_critical_tap_type(tap_type: i32) -> i32 {
+    if tap_type == TapType::Critical as i32 {
+        TapType::Tap as i32
+    } else if tap_type == TapType::CriticalTrend as i32 {
+        TapType::Trend as i32
+    } else if tap_type == TapType::CriticalCancel as i32 {
+        TapType::Cancel as i32
+    } else {
+        tap_type
+    }
+}
+
+fn direction_to_directional(direction: i32) -> i32 {
     match direction {
         1 => DirectionalType::UpperLeft as i32,
         2 => DirectionalType::UpperRight as i32,
@@ -497,39 +805,157 @@ fn directional_type(direction: i64) -> i32 {
     }
 }
 
-fn line_directional(note: &Value, bar: Fraction, lane: i32, width: i32) -> Option<NoteData> {
-    let note_type = match i64_field(note, "noteLineType").unwrap_or(0) {
+fn line_type_to_directional(line_type: i32) -> i32 {
+    match line_type {
         1 => DirectionalType::LowerLeft as i32,
         2 => DirectionalType::Down as i32,
-        _ => return None,
+        _ => 0,
+    }
+}
+
+fn is_hidden_head_slide_chain(
+    notes: &[RawNote],
+    chain: &[usize],
+    standalone_tap_slots: &HashSet<NoteSlotKey>,
+) -> bool {
+    let Some(&first_index) = chain.first() else {
+        return false;
     };
-
-    Some(directional_note(bar, lane, width, note_type))
+    let Some(&last_index) = chain.last() else {
+        return false;
+    };
+    let first = &notes[first_index];
+    let last = &notes[last_index];
+    first.note_base_type == 9
+        && last.note_base_type == 12
+        && last.category == 5
+        && standalone_tap_slots.contains(&note_slot_key(first))
 }
 
-fn tap_note(bar: Fraction, lane: i32, width: i32, note_type: i32) -> NoteData {
-    NoteData::Tap(NoteBase::new(bar, lane, width, note_type), Tap)
+fn is_decoration_slide_chain(notes: &[RawNote], chain: &[usize]) -> bool {
+    chain
+        .iter()
+        .any(|&note_index| is_decoration_slide_note(&notes[note_index]))
 }
 
-fn directional_note(bar: Fraction, lane: i32, width: i32, note_type: i32) -> NoteData {
-    NoteData::Directional(
-        NoteBase::new(bar, lane, width, note_type),
-        Directional::new(),
+fn chain_has_curve_line(notes: &[RawNote], chain: &[usize]) -> bool {
+    chain
+        .iter()
+        .any(|&note_index| notes[note_index].note_line_type != 0)
+}
+
+fn is_visible_relay_slide_note(note: &RawNote) -> bool {
+    note.note_base_type == 5 || note.category == 2
+}
+
+fn should_visible_relay_affect_path(note: &RawNote) -> bool {
+    is_visible_relay_slide_note(note) && note.is_skip_false
+}
+
+fn is_visible_relay_attachment(note: &RawNote) -> bool {
+    is_visible_relay_slide_note(note) && !should_visible_relay_affect_path(note)
+}
+
+fn is_decoration_slide_note(note: &RawNote) -> bool {
+    note.category == 9 || note.note_base_type == 10 || note.note_base_type == 13
+}
+
+fn note_slot_key(note: &RawNote) -> NoteSlotKey {
+    (note.ticks, note_lane(note), note_width(note))
+}
+
+fn tap_slot_key(note: &RawNote) -> TapSlotKey {
+    (note.ticks, note_lane(note))
+}
+
+fn note_lane(note: &RawNote) -> i32 {
+    note.lane_start + 2
+}
+
+fn note_width(note: &RawNote) -> i32 {
+    (note.lane_end - note.lane_start + 1).max(1)
+}
+
+fn note_speed_ratio(note: &RawNote) -> Option<f64> {
+    let speed_ratio = sanitize_speed_ratio(note.speed_ratio);
+    if (speed_ratio - 1.0).abs() > 0.0001 {
+        Some(speed_ratio)
+    } else {
+        None
+    }
+}
+
+fn sanitize_speed_ratio(speed_ratio: f64) -> f64 {
+    if !speed_ratio.is_finite() || speed_ratio <= 0.0 {
+        1.0
+    } else {
+        speed_ratio
+    }
+}
+
+fn parse_meta(data: &Value, chart: &Map<String, Value>) -> Meta {
+    let mut meta = Meta::new();
+    meta.title = custom_info_string(data, "title")
+        .or_else(|| string_field(data, "title"))
+        .or_else(|| string_field_from_map(chart, "title"));
+    meta.artist = custom_info_string(data, "artist").or_else(|| string_field(data, "artist"));
+    meta.designer = custom_info_string(data, "author")
+        .or_else(|| string_field(data, "author"))
+        .or_else(|| string_field(data, "designer"));
+    meta.difficulty = string_field(data, "musicDifficultyType")
+        .or_else(|| string_field_from_map(chart, "musicDifficultyType"));
+    meta.playlevel =
+        string_field(data, "playLevel").or_else(|| string_field_from_map(chart, "playLevel"));
+    meta.songid = string_field(data, "songId")
+        .or_else(|| string_field(data, "musicId"))
+        .or_else(|| string_field(data, "MusicId"))
+        .or_else(|| string_field_from_map(chart, "songId"))
+        .or_else(|| string_field_from_map(chart, "musicId"))
+        .or_else(|| string_field_from_map(chart, "MusicId"));
+    meta
+}
+
+fn merge_json_events_by_bar(score: &mut Score) {
+    let mut merged: BTreeMap<Fraction, Event> = BTreeMap::new();
+    for event in std::mem::take(&mut score.events) {
+        merged
+            .entry(event.bar)
+            .and_modify(|existing| {
+                existing.bpm = event.bpm.or(existing.bpm);
+                existing.bar_length = event.bar_length.or(existing.bar_length);
+                existing.sentence_length = event.sentence_length.or(existing.sentence_length);
+                existing.speed = event.speed.or(existing.speed);
+                existing.section = event.section.clone().or_else(|| existing.section.clone());
+                existing.text = event.text.clone().or_else(|| existing.text.clone());
+            })
+            .or_insert(event);
+    }
+    score.events = merged.into_values().collect();
+}
+
+fn time_signature_to_bar_length(value: Option<&Value>) -> Fraction {
+    if let Some(Value::String(raw)) = value {
+        let trimmed = raw.trim();
+        if let Some((numerator, denominator)) = trimmed.split_once('/')
+            && let (Ok(numerator), Ok(denominator)) = (
+                numerator.trim().parse::<f64>(),
+                denominator.trim().parse::<f64>(),
+            )
+            && denominator > 0.0
+        {
+            return Fraction::from_f64(numerator * 4.0 / denominator);
+        }
+    }
+    Fraction::from_f64(
+        value
+            .and_then(value_to_f64)
+            .unwrap_or(DEFAULT_BEATS_PER_MEASURE),
     )
 }
 
-fn slide_note(
-    bar: Fraction,
-    lane: i32,
-    width: i32,
-    note_type: i32,
-    channel: i32,
-    decoration: bool,
-) -> NoteData {
-    NoteData::Slide(
-        NoteBase::new(bar, lane, width, note_type),
-        Slide::new(channel, decoration),
-    )
+fn time_signature_to_tick_length(value: Option<&Value>, ticks_per_beat: i64) -> i64 {
+    let beat_length = time_signature_to_bar_length(value).to_f64();
+    ((beat_length * ticks_per_beat as f64).round() as i64).max(1)
 }
 
 fn array_field<'a>(object: &'a Map<String, Value>, key: &str) -> &'a [Value] {
@@ -539,24 +965,50 @@ fn array_field<'a>(object: &'a Map<String, Value>, key: &str) -> &'a [Value] {
         .map_or(&[], Vec::as_slice)
 }
 
-fn i64_field(value: &Value, key: &str) -> Option<i64> {
-    match value.get(key)? {
-        Value::Number(n) => n.as_i64(),
-        Value::String(s) => s.parse().ok(),
+fn int_field(value: &Value, key: &str, fallback: i64) -> i64 {
+    value.get(key).and_then(value_to_i64).unwrap_or(fallback)
+}
+
+fn value_to_i64(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(n) => n
+            .as_i64()
+            .or_else(|| n.as_f64().map(|value| value.round() as i64)),
+        Value::String(s) => s
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|value| value.round() as i64),
         _ => None,
     }
 }
 
-fn bool_field(value: &Value, key: &str) -> bool {
+fn float_field(value: &Value, key: &str, fallback: f64) -> f64 {
+    value.get(key).and_then(value_to_f64).unwrap_or(fallback)
+}
+
+fn value_to_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn truthy_field(value: &Value, key: &str) -> bool {
     match value.get(key) {
         Some(Value::Bool(value)) => *value,
-        Some(Value::Number(n)) => n.as_i64().is_some_and(|v| v != 0),
-        Some(Value::String(s)) => matches!(s.as_str(), "true" | "True" | "1"),
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|value| value != 0.0),
+        Some(Value::String(s)) => !s.is_empty() && s != "0" && s != "false" && s != "False",
         _ => false,
     }
 }
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(value_to_string)
+}
+
+fn string_field_from_map(value: &Map<String, Value>, key: &str) -> Option<String> {
     value.get(key).and_then(value_to_string)
 }
 
@@ -597,8 +1049,8 @@ mod tests {
               {"id": 3, "ticks": 3360, "eventType": 0, "changeValue": 180}
             ],
             "NoteList": [
-              {"id": 1, "ticks": 0, "laneStart": 0, "laneEnd": 1, "category": 0, "type": 0},
-              {"id": 2, "ticks": 480, "laneStart": 2, "laneEnd": 3, "category": 3, "type": 1, "direction": 2}
+              {"id": 1, "ticks": 0, "laneStart": 0, "laneEnd": 1, "category": 0, "type": 0, "noteBaseType": 1},
+              {"id": 2, "ticks": 480, "laneStart": 2, "laneEnd": 3, "category": 3, "type": 1, "direction": 2, "noteBaseType": 3}
             ]
           }
         }
@@ -618,26 +1070,137 @@ mod tests {
     }
 
     #[test]
-    fn parses_connected_slide_chain() {
+    fn connected_chain_uses_ts_slide_types() {
         let json = r#"
         {
           "MusicScoreEventDataList": [
             {"id": 1, "ticks": 0, "eventType": 0, "changeValue": 120}
           ],
           "NoteList": [
-            {"id": 10, "ticks": 0, "laneStart": 0, "laneEnd": 1, "category": 1, "type": 0, "previousConnectionId": -1, "nextConnectionId": 11, "IsConnectedFirst": true, "noteBaseType": 1},
-            {"id": 11, "ticks": 480, "laneStart": 1, "laneEnd": 2, "category": 1, "type": 0, "previousConnectionId": 10, "nextConnectionId": 12, "noteBaseType": 6},
-            {"id": 12, "ticks": 960, "laneStart": 2, "laneEnd": 3, "category": 1, "type": 0, "previousConnectionId": 11, "nextConnectionId": -1, "IsConnectedLast": true, "noteBaseType": 2}
+            {"id": 10, "ticks": 0, "laneStart": 0, "laneEnd": 1, "category": 1, "type": 0, "previousConnectionId": -1, "nextConnectionId": 11, "noteBaseType": 2},
+            {"id": 11, "ticks": 480, "laneStart": 1, "laneEnd": 2, "category": 1, "type": 0, "previousConnectionId": 10, "nextConnectionId": 12, "noteBaseType": 2},
+            {"id": 12, "ticks": 960, "laneStart": 2, "laneEnd": 3, "category": 1, "type": 0, "previousConnectionId": 11, "nextConnectionId": -1, "noteBaseType": 1}
           ]
         }
         "#;
 
         let score = parse_score_json(json).unwrap();
-        let slide_count = score
+        let slide_types: Vec<i32> = score
             .active_notes
             .iter()
-            .filter(|&&idx| score.notes[idx].is_slide())
-            .count();
-        assert_eq!(slide_count, 3);
+            .filter_map(|&idx| {
+                score.notes[idx]
+                    .is_slide()
+                    .then(|| score.notes[idx].note_type())
+            })
+            .collect();
+        assert_eq!(
+            slide_types,
+            vec![
+                SlideType::Start as i32,
+                SlideType::Start as i32,
+                SlideType::End as i32
+            ]
+        );
+    }
+
+    #[test]
+    fn standalone_cancel_notes_match_ts_output() {
+        let json = r#"
+        {
+          "MusicScoreEventDataList": [
+            {"id": 1, "ticks": 0, "eventType": 0, "changeValue": 120}
+          ],
+          "NoteList": [
+            {"id": 1, "ticks": 0, "laneStart": 0, "laneEnd": 1, "category": 7, "type": 1, "noteBaseType": 9}
+          ]
+        }
+        "#;
+
+        let score = parse_score_json(json).unwrap();
+        assert_eq!(score.active_notes.len(), 1);
+        let note = &score.notes[score.active_notes[0]];
+        assert!(note.is_none(&score.notes));
+    }
+
+    #[test]
+    fn parses_trace_flick_notes() {
+        let json = r#"
+        {
+          "MusicScoreEventDataList": [
+            {"id": 1, "ticks": 0, "eventType": 0, "changeValue": 120}
+          ],
+          "NoteList": [
+            {"id": 1, "ticks": 0, "laneStart": 0, "laneEnd": 1, "category": 8, "type": 1, "direction": 2, "noteBaseType": 4}
+          ]
+        }
+        "#;
+
+        let score = parse_score_json(json).unwrap();
+        assert_eq!(score.active_notes.len(), 1);
+        let note = &score.notes[score.active_notes[0]];
+        assert!(note.is_directional());
+        assert!(note.is_trend(&score.notes));
+        assert!(note.is_critical(&score.notes));
+    }
+
+    #[test]
+    fn relay_skip_notes_attach_tap_and_do_not_affect_path() {
+        let json = r#"
+        {
+          "MusicScoreEventDataList": [
+            {"id": 1, "ticks": 0, "eventType": 0, "changeValue": 120}
+          ],
+          "NoteList": [
+            {"id": 1, "ticks": 0, "laneStart": 0, "laneEnd": 1, "category": 1, "type": 0, "previousConnectionId": -1, "nextConnectionId": 2, "noteBaseType": 2},
+            {"id": 2, "ticks": 480, "laneStart": 1, "laneEnd": 2, "category": 2, "type": 0, "previousConnectionId": 1, "nextConnectionId": 3, "noteBaseType": 5},
+            {"id": 3, "ticks": 481, "laneStart": 2, "laneEnd": 3, "category": 2, "type": 0, "previousConnectionId": 2, "nextConnectionId": 4, "noteBaseType": 5},
+            {"id": 4, "ticks": 960, "laneStart": 3, "laneEnd": 4, "category": 2, "type": 0, "previousConnectionId": 3, "nextConnectionId": 5, "noteBaseType": 5, "isSkip": true},
+            {"id": 5, "ticks": 1440, "laneStart": 4, "laneEnd": 5, "category": 1, "type": 0, "previousConnectionId": 4, "nextConnectionId": -1, "noteBaseType": 1}
+          ]
+        }
+        "#;
+
+        let score = parse_score_json(json).unwrap();
+        let slides: Vec<_> = score
+            .active_notes
+            .iter()
+            .copied()
+            .filter(|&idx| score.notes[idx].is_slide())
+            .collect();
+        assert_eq!(slides.len(), 4);
+
+        let skip_slide = slides
+            .iter()
+            .copied()
+            .find(|&idx| score.notes[idx].bar() == Fraction::new(1, 2))
+            .expect("skip relay slide");
+        let slide = score.notes[skip_slide].as_slide().unwrap();
+        assert_ne!(slide.tap_idx, NO_NOTE);
+        assert!(!slide.is_path(score.notes[skip_slide].note_type()));
+    }
+
+    #[test]
+    fn parses_guide_chains_as_decoration() {
+        let json = r#"
+        {
+          "MusicScoreEventDataList": [
+            {"id": 1, "ticks": 0, "eventType": 0, "changeValue": 120}
+          ],
+          "NoteList": [
+            {"id": 1, "ticks": 0, "laneStart": 0, "laneEnd": 1, "category": 9, "type": 0, "previousConnectionId": -1, "nextConnectionId": 2, "noteBaseType": 10},
+            {"id": 2, "ticks": 480, "laneStart": 4, "laneEnd": 5, "category": 9, "type": 0, "previousConnectionId": 1, "nextConnectionId": -1, "noteBaseType": 13}
+          ]
+        }
+        "#;
+
+        let score = parse_score_json(json).unwrap();
+        let slides: Vec<_> = score
+            .active_notes
+            .iter()
+            .filter_map(|&idx| score.notes[idx].as_slide())
+            .collect();
+        assert_eq!(slides.len(), 2);
+        assert!(slides.iter().all(|slide| slide.decoration));
     }
 }
