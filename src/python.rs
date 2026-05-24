@@ -99,6 +99,7 @@ fn open_score_for_render(sus_path: &str, rebase_json: Option<&str>) -> PyResult<
     Ok(score)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drawing_for_render(
     note_host: Option<String>,
     style_sheet: Option<String>,
@@ -455,6 +456,7 @@ impl PyScore {
 
     /// Set metadata fields (keyword args, all optional)
     #[pyo3(signature = (title=None, artist=None, difficulty=None, playlevel=None, jacket=None, songid=None, subtitle=None))]
+    #[allow(clippy::too_many_arguments)]
     fn set_meta(
         &mut self,
         title: Option<String>,
@@ -655,6 +657,7 @@ struct PyDrawing {
 impl PyDrawing {
     #[new]
     #[pyo3(signature = (score=None, lyric=None, style_sheet=None, note_host=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         score: Option<PyRef<'_, PyScore>>,
         lyric: Option<PyRef<'_, PyLyric>>,
@@ -822,6 +825,7 @@ impl PyDrawing {
 /// Convenience function: parse a score file and generate SVG in one call
 #[pyfunction]
 #[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
+#[allow(clippy::too_many_arguments)]
 fn sus_to_svg(
     sus_path: &str,
     note_host: Option<String>,
@@ -855,6 +859,7 @@ fn sus_to_svg(
 /// Convenience function: parse a score file and generate PNG bytes in one call
 #[pyfunction]
 #[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
+#[allow(clippy::too_many_arguments)]
 fn sus_to_png<'py>(
     py: Python<'py>,
     sus_path: &str,
@@ -890,6 +895,7 @@ fn sus_to_png<'py>(
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
 #[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
+#[allow(clippy::too_many_arguments)]
 fn sus_to_jpg<'py>(
     py: Python<'py>,
     sus_path: &str,
@@ -926,6 +932,7 @@ fn sus_to_jpg<'py>(
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
 #[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
+#[allow(clippy::too_many_arguments)]
 fn sus_to_jpeg<'py>(
     py: Python<'py>,
     sus_path: &str,
@@ -963,6 +970,7 @@ fn sus_to_jpeg<'py>(
 /// Convenience function: parse a score file and generate SVG in one call
 #[pyfunction]
 #[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
+#[allow(clippy::too_many_arguments)]
 fn score_to_svg(
     score_path: &str,
     note_host: Option<String>,
@@ -996,6 +1004,7 @@ fn score_to_svg(
 /// Convenience function: parse a score file and generate PNG bytes in one call
 #[pyfunction]
 #[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None))]
+#[allow(clippy::too_many_arguments)]
 fn score_to_png<'py>(
     py: Python<'py>,
     score_path: &str,
@@ -1031,6 +1040,7 @@ fn score_to_png<'py>(
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
 #[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
+#[allow(clippy::too_many_arguments)]
 fn score_to_jpg<'py>(
     py: Python<'py>,
     score_path: &str,
@@ -1068,6 +1078,7 @@ fn score_to_jpg<'py>(
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
 #[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
+#[allow(clippy::too_many_arguments)]
 fn score_to_jpeg<'py>(
     py: Python<'py>,
     score_path: &str,

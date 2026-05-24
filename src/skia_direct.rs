@@ -1384,16 +1384,19 @@ impl<'a> DirectRenderer<'a> {
                 let y = cfg.time_height * score.get_time_delta_f64(note.bar(), bar_stop)
                     + cfg.time_padding as f64;
                 let next = &arena[next_idx];
-                let interval_frac =
-                    if next.bar() == note.bar() || (next.bar() - note.bar()).to_f64() > 1.0 {
-                        Fraction::from_integer(note.bar().floor() + 1) - note.bar()
-                    } else if (next.bar() - note.bar()).to_f64() > 0.5
-                        && next.bar().floor() != note.bar().floor()
-                    {
-                        Fraction::from_integer(note.bar().floor() + 1) - note.bar()
-                    } else {
-                        next.bar() - note.bar()
-                    };
+                let note_bar = note.bar();
+                let next_bar = next.bar();
+                let bar_delta = next_bar - note_bar;
+                let crosses_half_bar_boundary =
+                    bar_delta.to_f64() > 0.5 && next_bar.floor() != note_bar.floor();
+                let interval_frac = if next_bar == note_bar
+                    || bar_delta.to_f64() > 1.0
+                    || crosses_half_bar_boundary
+                {
+                    Fraction::from_integer(note_bar.floor() + 1) - note_bar
+                } else {
+                    bar_delta
+                };
                 self.draw_tick_with_interval(canvas, score, y, interval_frac, note.bar());
             }
         }
@@ -1456,6 +1459,7 @@ impl<'a> DirectRenderer<'a> {
         draw_vector_among(canvas, kind, x, y, width, height);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_note_image_asset(
         &self,
         canvas: &skia_safe::Canvas,
@@ -1554,7 +1558,7 @@ impl<'a> DirectRenderer<'a> {
             return Ok(());
         };
 
-        let bytes = fs::read(&path).map_err(|source| SkiaDirectError::Io {
+        let bytes = fs::read(path.as_path()).map_err(|source| SkiaDirectError::Io {
             path: path.clone(),
             source,
         })?;
@@ -1562,7 +1566,7 @@ impl<'a> DirectRenderer<'a> {
             .ok_or_else(|| SkiaDirectError::Decode(path.clone()))?;
         let paint = fill_paint(RGBA::WHITE);
         let sampling = SamplingOptions::from(FilterMode::Linear);
-        canvas.draw_image_rect_with_sampling_options(&image, None, &rect, sampling, &paint);
+        canvas.draw_image_rect_with_sampling_options(&image, None, rect, sampling, &paint);
         Ok(())
     }
 
@@ -1575,7 +1579,7 @@ impl<'a> DirectRenderer<'a> {
         height: f64,
     ) {
         let fill = self.color("lane", RGBA::rgb(0xcf, 0xd8, 0xdc));
-        canvas.draw_rect(&rect(x, y, width, height), &fill_paint(fill));
+        canvas.draw_rect(rect(x, y, width, height), &fill_paint(fill));
         self.draw_line(
             canvas,
             x,
@@ -1598,6 +1602,7 @@ impl<'a> DirectRenderer<'a> {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_rect(
         &self,
         canvas: &skia_safe::Canvas,
@@ -1609,9 +1614,10 @@ impl<'a> DirectRenderer<'a> {
         fallback: RGBA,
     ) {
         let paint = fill_paint(self.color(class_name, fallback));
-        canvas.draw_rect(&rect(x, y, width, height), &paint);
+        canvas.draw_rect(rect(x, y, width, height), &paint);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_line(
         &self,
         canvas: &skia_safe::Canvas,
@@ -1630,6 +1636,7 @@ impl<'a> DirectRenderer<'a> {
         canvas.draw_line((as_f32(x1), as_f32(y1)), (as_f32(x2), as_f32(y2)), &paint);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &self,
         canvas: &skia_safe::Canvas,
@@ -1982,7 +1989,7 @@ fn build_font_manager(
 
     let mut custom_typefaces = HashMap::<String, Vec<Typeface>>::new();
     for path in &font_paths {
-        let bytes = fs::read(&path).map_err(|source| SkiaDirectError::Font {
+        let bytes = fs::read(path.as_path()).map_err(|source| SkiaDirectError::Font {
             path: path.clone(),
             source,
         })?;
@@ -2495,13 +2502,14 @@ fn draw_vector_note_body(
         (height * 0.045).max(1.0) as f32,
     );
     canvas.draw_round_rect(
-        &rect(body_x, body_y, body_w, body_h),
+        rect(body_x, body_y, body_w, body_h),
         as_f32(radius),
         as_f32(radius),
         &paint,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_vector_flick(
     canvas: &skia_safe::Canvas,
     is_critical: bool,
@@ -2655,7 +2663,7 @@ fn draw_round_rect(
     color: RGBA,
 ) {
     canvas.draw_round_rect(
-        &rect(x, y, width, height),
+        rect(x, y, width, height),
         as_f32(radius),
         as_f32(radius),
         &fill_paint(color),
@@ -2754,7 +2762,7 @@ fn draw_image(canvas: &skia_safe::Canvas, image: &Image, x: f64, y: f64, width: 
     let dst = rect(x, y, width, height);
     let paint = image_paint();
     let sampling = SamplingOptions::from(FilterMode::Linear);
-    canvas.draw_image_rect_with_sampling_options(image, None, &dst, sampling, &paint);
+    canvas.draw_image_rect_with_sampling_options(image, None, dst, sampling, &paint);
 }
 
 fn draw_image_src_dst(canvas: &skia_safe::Canvas, image: &Image, src: Rect, dst: Rect) {
@@ -2763,7 +2771,7 @@ fn draw_image_src_dst(canvas: &skia_safe::Canvas, image: &Image, src: Rect, dst:
     canvas.draw_image_rect_with_sampling_options(
         image,
         Some((&src, skia_safe::canvas::SrcRectConstraint::Fast)),
-        &dst,
+        dst,
         sampling,
         &paint,
     );
@@ -2874,6 +2882,7 @@ fn note_palette(note_number: i32) -> NotePalette {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::upper_case_acronyms)]
 struct RGBA {
     r: u8,
     g: u8,
@@ -2889,6 +2898,7 @@ impl RGBA {
         Self { r, g, b, a: 0xff }
     }
 
+    #[allow(clippy::self_named_constructors)]
     const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
     }

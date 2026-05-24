@@ -18,6 +18,7 @@ cargo build --release
 cargo build --release --features skia-image
 cargo check
 cargo check --features 'python skia-image'
+cargo check --target wasm32-unknown-unknown --no-default-features --features wasm --lib
 cargo test --features skia-image
 
 # Python wheel (current platform, active venv)
@@ -26,6 +27,9 @@ maturin build --release --features python,skia-image
 # or for development install:
 maturin develop --release
 maturin develop --release --features python,skia-image
+
+# WebAssembly (SVG only; no skia-image)
+wasm-pack build --release --target web --no-default-features --features wasm
 
 # Python 3.14t free-threaded wheel (macOS ARM64)
 maturin build --release -i python3.14t
@@ -56,6 +60,7 @@ src/
 ├── drawing.rs      SVG renderer — direct String building, ~750 lines
 ├── skia_direct.rs  Direct Skia PNG/JPEG renderer + CSS/font handling
 ├── python.rs       All PyO3 bindings (PyScore, PyDrawing, PyRebase, PyLyric, PyEvent)
+├── wasm.rs         wasm-bindgen bindings (Score, Drawing, Rebase, Lyric; SVG only)
 ├── notes.rs        NoteData enum, arena index pattern (NoteIdx = usize)
 └── notes/
     ├── tap.rs          TapType (8 variants)
@@ -70,6 +75,9 @@ src/
 
 ### `Score::parse` and `impl std::str::FromStr`
 `Score` implements `std::str::FromStr`. Use `Score::parse(content)` as the public Rust method, or `content.parse::<Score>()` via the trait. The Python binding `Score.from_str(s)` delegates to `s.parse::<Score>().unwrap()`.
+
+### WebAssembly API
+The `wasm` feature is independent from `python` and `skia-image`. It exposes `Score`, `Drawing`, `Rebase`, and `Lyric` through `wasm-bindgen` for in-memory `.sus` / custom-chart JSON parsing and SVG string output. Keep browser-facing APIs content-based (`Score.fromSus`, `Score.fromJson`, `Score.load`, `Drawing.svg`) instead of file-path based; `Score::open*`, CLI code, local font scanning, and Skia raster output are not part of the wasm surface.
 
 ### `DrawingConfig.generator` / `Drawing::new` signature
 `DrawingConfig` carries a `generator: String` field (default `"HarukiBot NEO"`). `Drawing::new` accepts `generator: Option<String>` as the 6th argument — `None` keeps the default. The SVG subtitle reads from this field. Python exposes it as a `generator=None` keyword argument on `Drawing(...)` and `sus_to_svg(...)`.

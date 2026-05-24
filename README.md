@@ -216,6 +216,42 @@ maturin develop --release
 maturin develop --release --features python,skia-image
 ```
 
+### WebAssembly
+
+The `wasm` feature exposes the parser, timing APIs, rebase transform, lyric parser, and SVG renderer through `wasm-bindgen`. It intentionally does not include `skia-image`; browser and worker builds should render SVG directly or let the host application rasterize it.
+
+Build with [wasm-pack](https://rustwasm.github.io/wasm-pack/):
+
+```bash
+wasm-pack build --release --target web --no-default-features --features wasm
+```
+
+Or check the core wasm target directly:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo check --target wasm32-unknown-unknown --no-default-features --features wasm --lib
+```
+
+Example browser usage:
+
+```js
+import init, { Drawing, Score, scoreToSvg } from "./pkg/pjsekai_scores_rs.js";
+
+await init();
+
+const svg = scoreToSvg(susOrJsonText);
+
+const score = Score.load(susOrJsonText);
+const drawing = new Drawing();
+drawing.setNoteHost("/live/note/custom01");
+drawing.setGenerator("My Web Preview");
+
+const customSvg = drawing.svg(score);
+```
+
+The wasm API accepts in-memory strings instead of file paths. Use `Score.fromSus()`, `Score.fromJson()`, or `Score.load()` rather than `Score::open()` style filesystem APIs.
+
 ### Python API
 
 #### Score loading
@@ -489,6 +525,7 @@ pjsekai-scores-rs/
     ├── drawing.rs      # SVG renderer (direct String building)
     ├── skia_direct.rs  # Direct Skia PNG/JPEG renderer
     ├── python.rs       # PyO3 bindings (Score, Drawing, Rebase, Lyric, Event)
+    ├── wasm.rs         # wasm-bindgen bindings (Score, Drawing, Rebase, Lyric)
     ├── notes.rs        # NoteData enum + NoteBase + arena index pattern
     └── notes/
         ├── tap.rs          # TapType (8 variants)
@@ -501,6 +538,7 @@ pjsekai-scores-rs/
 
 - The `python` feature gate enables PyO3. Without it, the crate builds as a pure Rust library + CLI binary with no Python dependency.
 - `Score::open()` and `Score::parse_auto()` auto-detect JSON-looking custom chart input; use `Score::open_sus()` / `Score::parse()` or `Score::open_json()` / `Score::parse_json()` to force a format.
+- The `wasm` feature enables `wasm-bindgen` exports for in-memory parsing and SVG rendering. It is independent from `python` and `skia-image`; do not use local file-path APIs in browser builds.
 - The `skia-image` feature enables direct PNG/JPEG output. Python wheels omit it by default; build from source with `--features python,skia-image` when image bytes are needed.
 - Skia image output parses CSS colors, font sizes, font weights, and `font-family`. Use `font_paths` / `font_dirs` or CLI `--font-path` / `--font-dir` when deployment fonts should not depend on the host system.
 - `--perf` reports render, layout, setup, draw, encode, copy, write, and total timings. PNG encoding is lossless and can be much slower than JPEG on large charts.

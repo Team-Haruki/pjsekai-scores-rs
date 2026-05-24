@@ -134,6 +134,15 @@ impl Drawing {
         self.config.note_asset_extension = normalize_note_asset_extension(extension.into());
     }
 
+    pub fn set_style_sheet(&mut self, style_sheet: Option<String>) {
+        let mut css = DEFAULT_CSS.to_string();
+        if let Some(extra) = style_sheet {
+            css.push('\n');
+            css.push_str(&extra);
+        }
+        self.style_sheet = css;
+    }
+
     pub fn set_font_paths<I, S>(&mut self, paths: I)
     where
         I: IntoIterator<Item = S>,

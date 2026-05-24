@@ -35,6 +35,9 @@ pub use skia_direct::{
 #[cfg(feature = "python")]
 mod python;
 
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 

@@ -14,6 +14,7 @@ cargo build --release --features skia-image   # Skia image CLI binary
 cargo check                                   # Type check (pure Rust, no PyO3)
 cargo check --features python                 # Type check with PyO3 bindings
 cargo check --features 'python skia-image'    # Type check optional image bindings
+cargo check --target wasm32-unknown-unknown --no-default-features --features wasm --lib  # Check wasm bindings
 cargo test                                    # Run all tests
 cargo test --features skia-image              # Run tests including Skia/CSS/font code
 cargo test <test_name>                        # Run a single test
@@ -24,6 +25,8 @@ cargo fmt                                     # Auto-format
 maturin build --release                       # Default Python wheel
 maturin build --release --features python,skia-image  # Optional Skia image wheel
 maturin develop --release                     # Build + install default wheel into active venv
+
+wasm-pack build --release --target web --no-default-features --features wasm  # SVG-only wasm package
 ```
 
 CI runs `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --all --check` on every push/PR to main.
@@ -32,6 +35,9 @@ CI runs `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --all --chec
 
 ### Dual distribution
 The `python` feature gate (`#[cfg(feature = "python")]`) enables PyO3 bindings in `python.rs`. Without it, the crate builds as a pure Rust library + CLI. The `pyproject.toml` / maturin config automatically enables this feature for wheel builds. The `skia-image` feature is optional for Python wheels and must be requested explicitly when building Skia-enabled wheels.
+
+### WebAssembly bindings
+The `wasm` feature enables `wasm-bindgen` exports in `wasm.rs`. This surface is content-based and SVG-only: use `Score.fromSus`, `Score.fromJson`, `Score.load`, `Rebase.fromJson`, `Lyric.fromText`, and `Drawing.svg` from browser or worker code. Do not add file-path based APIs, Skia raster output, or local font scanning to the wasm surface.
 
 ### Arena pattern for notes
 Notes live in `Score::notes: Vec<NoteData>`. Cross-references (slide head/tail/next) use `NoteIdx = usize` with `NO_NOTE = usize::MAX`. Never use `Rc`, `Arc`, or `RefCell` — they break free-threaded Python (3.13t/3.14t) compatibility.
@@ -53,6 +59,9 @@ CSS family lookup uses localized family names, Skia family names, and PostScript
 
 ### `python.rs` is a thin binding layer
 All business logic lives in the core modules. `python.rs` only wraps types for PyO3. Keep `font_paths` / `font_dirs` available on `Drawing`, `score_to_svg/png/jpg/jpeg`, and the backward-compatible `sus_to_*` helpers when adjusting rendering arguments.
+
+### `wasm.rs` is a thin binding layer
+Keep wasm-only glue in `wasm.rs` and route behavior through the core `Score`, `Drawing`, `Rebase`, and `Lyric` types. The wasm API should stay independent from the `python` and `skia-image` features.
 
 ### `pub init_notes()` / `pub init_events()`
 These must remain `pub` — called by `rebase.rs` after rebuilding note/event vectors.
