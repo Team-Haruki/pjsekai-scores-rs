@@ -72,8 +72,57 @@ These must remain `pub` — called by `rebase.rs` after rebuilding note/event ve
 ### Raw strings with `href="#`
 Use `r##"..."##` (not `r#"..."#`) for format strings containing `href="#` — the `"#` sequence prematurely closes single-hash raw strings.
 
-## Git commit format
+## Git commits
 
-All commits **must** follow `[Type] Short description` where Type is one of `[Feat]`, `[Fix]`, `[Chore]`, `[Docs]`. Description starts with a capital letter, imperative mood, no trailing period, ≤ ~70 chars. Agent commits must include a standard `Co-authored-by:` trailer identifying the agent. Prefer signed commits (`git commit -S`) and signed release tags (`git tag -s`); verify release signatures with `git log -1 --show-signature` and `git tag -v vX.Y.Z`.
+All commit subjects must follow:
 
-When changing CLI/Python rendering options, update `README.md`, `AGENTS.md`, and `CLAUDE.md` together.
+```text
+[Type] Short description starting with capital letter
+```
+
+Allowed types:
+
+| Type      | Usage                                                 |
+|-----------|-------------------------------------------------------|
+| `[Feat]`  | New feature or capability                             |
+| `[Fix]`   | Bug fix                                               |
+| `[Chore]` | Maintenance, refactoring, dependency or build changes |
+| `[Docs]`  | Documentation-only changes                            |
+
+Rules:
+
+- Description starts with a capital letter.
+- Use imperative mood: `Add ...`, not `Added ...`.
+- No trailing period.
+- Keep the subject at or below roughly 70 characters.
+- **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
+  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Codex: `Co-authored-by: Codex <noreply@openai.com>`
+  - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
+
+Examples from this repo's history:
+
+```text
+[Feat] Add wasm bindings and Python type stubs
+[Fix] Collapse JSON slide link condition
+[Chore] Update dependencies
+[Docs] Update Skia font documentation
+```
+
+## GitHub Actions workflows
+
+Use the standardized workflow layout in `.github/workflows`:
+
+- `ci.yml` runs on `main` pushes, pull requests targeting `main`, and manual dispatch.
+- Rust CI order: `cargo fmt --all -- --check`, `cargo check --locked --all-targets`, `cargo clippy --locked --all-targets -- -D warnings`, then `cargo test --locked`.
+- `release.yml` is the standard release build entrypoint. It runs on `v*` tags and manual dispatch, builds release artifacts, uploads them with `actions/upload-artifact`, and publishes GitHub Release assets on tag pushes.
+- `release-crate.yml` publishes the Rust crate and keeps its package-specific release flow.
+- `release-python.yml` builds and publishes Python artifacts and keeps its package-specific release flow.
+
+Workflow maintenance rules:
+
+- Keep workflow filenames and top-level names aligned: `CI`, `Release`, `Docker`, and optional package-specific names.
+- Use `actions/checkout@v6`, `actions/setup-go@v6`, `actions/upload-artifact@v7`, `actions/download-artifact@v8`, `softprops/action-gh-release@v3`, and current Docker actions (`setup-buildx@v4`, `login@v4`, `metadata@v6`, `build-push@v7`).
+- Keep `permissions` minimal: `contents: read` for CI/Docker build-only work, `contents: write` for release publishing, and `packages: write` only when pushing container images.
+- Use workflow `concurrency` keyed by workflow name and ref, with release jobs using `release-${{ github.ref_name }}` and `cancel-in-progress: false`.
+- Do not reintroduce legacy workflow names such as `rust-ci.yml`, `build.yml`, `release-build.yml`, `docker-build.yml`, or `docker-release.yml` unless a package-specific workflow already exists and is intentionally preserved.
