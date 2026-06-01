@@ -1088,11 +1088,8 @@ mod tests {
         let slide_types: Vec<i32> = score
             .active_notes
             .iter()
-            .filter_map(|&idx| {
-                score.notes[idx]
-                    .is_slide()
-                    .then(|| score.notes[idx].note_type())
-            })
+            .filter(|&&idx| score.notes[idx].is_slide())
+            .map(|&idx| score.notes[idx].note_type())
             .collect();
         assert_eq!(
             slide_types,
