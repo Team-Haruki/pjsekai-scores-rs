@@ -34,7 +34,7 @@ jobs:
             pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set Python package metadata
         run: bash .github/scripts/configure-python-package.sh
         env:
@@ -78,7 +78,7 @@ jobs:
             pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set Python package metadata
         run: bash .github/scripts/configure-python-package.sh
         env:
@@ -119,7 +119,7 @@ jobs:
             pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set Python package metadata
         run: bash .github/scripts/configure-python-package.sh
         env:
@@ -169,7 +169,7 @@ jobs:
             pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set Python package metadata
         shell: bash
         run: bash .github/scripts/configure-python-package.sh
@@ -218,7 +218,7 @@ jobs:
             pyproject_features: '["python", "skia-image"]'
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       - name: Set Python package metadata
         run: bash .github/scripts/configure-python-package.sh
         env:
