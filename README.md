@@ -358,7 +358,7 @@ lyric.word_count()  # -> int
 
 #### Drawing
 
-`Drawing` can render any `Score`, whether it came from SUS or JSON. `png()`, `jpg()`, and `jpeg()` require the `pjsekai-scores-rs-skia-image` package or a local build with `--features python,skia-image`.
+`Drawing` can render any `Score`, whether it came from SUS or JSON. `png()`, `jpg()`, `jpeg()`, and `raster()` require the `pjsekai-scores-rs-skia-image` package or a local build with `--features python,skia-image`.
 
 ```python
 drawing = scores.Drawing(
@@ -393,7 +393,14 @@ svg_string = drawing.svg(score, lyric=lyric)
 png_bytes = drawing.png(score)
 jpg_bytes = drawing.jpg(score, jpeg_quality=90)
 jpeg_bytes = drawing.jpeg(score, jpeg_quality=90)
+
+# Native N32 premultiplied pixels for zero-copy extension-to-extension composition.
+raster = drawing.raster(score)
+assert raster.nbytes == raster.row_bytes * raster.height
+pixel_view = memoryview(raster)  # read-only; no PNG encode or pixel copy
 ```
+
+`RasterImage` owns the Skia pixel allocation and exports it through Python's read-only buffer protocol. Its `color_type` is `"rgba8888"` or `"bgra8888"`, and `alpha_type` is `"premul"`. Keep the object alive while a consumer borrows its buffer; use `to_bytes()` only when an owned copy is actually required.
 
 `font_paths` and `font_dirs` only affect direct Skia PNG/JPEG rendering. SVG output keeps CSS as text and lets the viewer resolve fonts. For services, prefer explicit `font_paths` over broad `font_dirs`: directory inputs are scanned recursively before rendering, while loaded custom typefaces are cached per process by font path, modified time, and file size.
 
@@ -542,6 +549,8 @@ pjsekai-scores-rs/
 - The `skia-image` feature enables direct PNG/JPEG output. Python wheels omit it by default; build from source with `--features python,skia-image` when image bytes are needed.
 - Skia image output parses CSS colors, font sizes, font weights, and `font-family`. Use `font_paths` / `font_dirs` or CLI `--font-path` / `--font-dir` when deployment fonts should not depend on the host system.
 - `--perf` reports render, layout, setup, draw, encode, copy, write, and total timings. PNG encoding is lossless and can be much slower than JPEG on large charts.
+- Direct PNG output uses the multithreaded `mtpng` fast encoder by default. Set `PJSEKAI_SCORES_PNG_ENCODER=skia` to restore the Skia encoder for diagnostics, and `PJSEKAI_SCORES_PROFILE=1` to log per-render phase timings.
+- `Drawing.raster()` renders directly into a read-only native N32 buffer. It is intended for in-process consumers that can compose the pixels without an intermediate PNG encode/decode cycle.
 - All `#[pyclass]` types are `Send + Sync` (no `Rc`/`RefCell`), satisfying Python 3.13t / 3.14t free-threaded requirements.
 - CSS is embedded at compile time via `include_str!` — no runtime file lookup required.
 - The `generate-import-lib` PyO3 feature is enabled so the Windows wheel can be cross-compiled without a local Windows Python installation.

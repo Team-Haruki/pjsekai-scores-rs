@@ -2,13 +2,15 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use mtpng::encoder::{Encoder as MtpngEncoder, Options as MtpngOptions};
+use mtpng::{ColorType as MtpngColorType, CompressionLevel, Header as MtpngHeader};
 use skia_safe::{
-    Color, Color4f, Data, EncodedImageFormat, FilterMode, Font, FontMgr, FontStyle, Image, Paint,
-    PaintStyle, PathBuilder, Point, Rect, SamplingOptions, TileMode, Typeface, Unichar, gradient,
-    surfaces,
+    AlphaType, Color, Color4f, ColorType, Data, EncodedImageFormat, FilterMode, Font, FontMgr,
+    FontStyle, Image, ImageInfo, Paint, PaintStyle, PathBuilder, Point, Rect, SamplingOptions,
+    Surface, TileMode, Typeface, Unichar, gradient, surfaces,
 };
 
 use crate::drawing::{CoverObject, Drawing, DrawingConfig};
@@ -28,6 +30,7 @@ const CUSTOM_FONT_CACHE_MAX_ENTRIES: usize = 8;
 
 static CUSTOM_FONT_CACHE: LazyLock<Mutex<HashMap<Vec<FontFileKey>, SharedCustomTypefaces>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 const FALLBACK_FONT_FAMILIES: &[&str] = &[
     "Hiragino Sans",
@@ -71,6 +74,43 @@ pub enum SkiaImageFormat {
     Jpeg { quality: u8 },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PngEncoder {
+    Mtpng,
+    Skia,
+}
+
+impl PngEncoder {
+    fn configured() -> Self {
+        match std::env::var("PJSEKAI_SCORES_PNG_ENCODER").ok().as_deref() {
+            Some("skia") => Self::Skia,
+            _ => Self::Mtpng,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Mtpng => "mtpng",
+            Self::Skia => "skia",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkiaRasterColorType {
+    Rgba8888,
+    Bgra8888,
+}
+
+impl SkiaRasterColorType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rgba8888 => "rgba8888",
+            Self::Bgra8888 => "bgra8888",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SkiaRenderStats {
     pub layout: Duration,
@@ -84,6 +124,16 @@ pub struct SkiaRenderStats {
 #[derive(Debug)]
 pub struct SkiaImageOutput {
     pub bytes: Vec<u8>,
+    pub stats: SkiaRenderStats,
+}
+
+#[derive(Debug)]
+pub struct SkiaRasterOutput {
+    pub width: i32,
+    pub height: i32,
+    pub row_bytes: usize,
+    pub color_type: SkiaRasterColorType,
+    pub pixels: Vec<u8>,
     pub stats: SkiaRenderStats,
 }
 
@@ -126,6 +176,18 @@ pub fn score_to_skia_png(
     score_to_skia_image(drawing, score, lyric, SkiaImageFormat::Png)
 }
 
+pub fn score_to_skia_png_with_encoder(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+    encoder: PngEncoder,
+) -> Result<Vec<u8>, SkiaDirectError> {
+    Ok(
+        score_to_skia_image_with_png_encoder(drawing, score, lyric, SkiaImageFormat::Png, encoder)?
+            .bytes,
+    )
+}
+
 pub fn score_to_skia_jpeg(
     drawing: &mut Drawing,
     score: &mut Score,
@@ -150,7 +212,73 @@ pub fn score_to_skia_image_with_stats(
     lyric: Option<&Lyric>,
     format: SkiaImageFormat,
 ) -> Result<SkiaImageOutput, SkiaDirectError> {
+    score_to_skia_image_with_png_encoder(drawing, score, lyric, format, PngEncoder::configured())
+}
+
+pub fn score_to_skia_raster(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+) -> Result<SkiaRasterOutput, SkiaDirectError> {
     let total_started = Instant::now();
+    let prepared = prepare_render(drawing, score)?;
+    let image_info = ImageInfo::new_n32_premul((prepared.width, prepared.height), None);
+    let color_type = match image_info.color_type() {
+        ColorType::RGBA8888 => SkiaRasterColorType::Rgba8888,
+        ColorType::BGRA8888 => SkiaRasterColorType::Bgra8888,
+        _ => return Err(SkiaDirectError::Surface),
+    };
+    let row_bytes = image_info.min_row_bytes();
+    let mut pixels = vec![0_u8; image_info.compute_byte_size(row_bytes)];
+    let setup_started = Instant::now();
+    let mut surface = surfaces::wrap_pixels(&image_info, &mut pixels, row_bytes, None)
+        .ok_or(SkiaDirectError::Surface)?;
+    let (setup_duration, draw_duration) = draw_prepared(
+        &mut surface,
+        drawing,
+        score,
+        lyric,
+        &prepared.layout,
+        setup_started,
+    )?;
+    drop(surface);
+
+    let output = SkiaRasterOutput {
+        width: prepared.width,
+        height: prepared.height,
+        row_bytes,
+        color_type,
+        pixels,
+        stats: SkiaRenderStats {
+            layout: prepared.layout_duration,
+            setup: setup_duration,
+            draw: draw_duration,
+            encode: Duration::ZERO,
+            copy: Duration::ZERO,
+            total: total_started.elapsed(),
+        },
+    };
+    log_profile(
+        "raw-n32",
+        output.width,
+        output.height,
+        output.pixels.len(),
+        &output.stats,
+    );
+    Ok(output)
+}
+
+struct PreparedRender {
+    layout: Layout,
+    width: i32,
+    height: i32,
+    layout_duration: Duration,
+}
+
+fn prepare_render(
+    drawing: &mut Drawing,
+    score: &mut Score,
+) -> Result<PreparedRender, SkiaDirectError> {
     if drawing.skill {
         drawing.build_skill_covers(score);
     }
@@ -163,42 +291,173 @@ pub fn score_to_skia_image_with_stats(
     if width <= 0 || height <= 0 {
         return Err(SkiaDirectError::InvalidSize);
     }
+    Ok(PreparedRender {
+        layout,
+        width,
+        height,
+        layout_duration,
+    })
+}
 
-    let setup_started = Instant::now();
-    let mut surface =
-        surfaces::raster_n32_premul((width, height)).ok_or(SkiaDirectError::Surface)?;
+fn draw_prepared(
+    surface: &mut Surface,
+    drawing: &Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+    layout: &Layout,
+    setup_started: Instant,
+) -> Result<(Duration, Duration), SkiaDirectError> {
     let styles = CssStyles::parse(&drawing.style_sheet);
     let renderer = DirectRenderer::new(drawing, styles)?;
     let setup_duration = setup_started.elapsed();
     let draw_started = Instant::now();
-    renderer.draw_page(surface.canvas(), score, lyric, &layout)?;
-    let draw_duration = draw_started.elapsed();
+    renderer.draw_page(surface.canvas(), score, lyric, layout)?;
+    Ok((setup_duration, draw_started.elapsed()))
+}
 
-    let image = surface.image_snapshot();
-    let (encoded_format, quality) = match format {
-        SkiaImageFormat::Png => (EncodedImageFormat::PNG, 100),
-        SkiaImageFormat::Jpeg { quality } => (EncodedImageFormat::JPEG, quality.min(100) as u32),
+fn score_to_skia_image_with_png_encoder(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+    format: SkiaImageFormat,
+    png_encoder: PngEncoder,
+) -> Result<SkiaImageOutput, SkiaDirectError> {
+    let total_started = Instant::now();
+    let prepared = prepare_render(drawing, score)?;
+    let setup_started = Instant::now();
+    let mut surface = surfaces::raster_n32_premul((prepared.width, prepared.height))
+        .ok_or(SkiaDirectError::Surface)?;
+    let (setup_duration, draw_duration) = draw_prepared(
+        &mut surface,
+        drawing,
+        score,
+        lyric,
+        &prepared.layout,
+        setup_started,
+    )?;
+
+    let (bytes, encode_duration, copy_duration, encoder_name) = match format {
+        SkiaImageFormat::Png if png_encoder == PngEncoder::Mtpng => {
+            let encode_started = Instant::now();
+            let bytes = encode_surface_mtpng(&mut surface)?;
+            (
+                bytes,
+                encode_started.elapsed(),
+                Duration::ZERO,
+                png_encoder.name(),
+            )
+        }
+        SkiaImageFormat::Png => {
+            let image = surface.image_snapshot();
+            let encode_started = Instant::now();
+            #[allow(deprecated)]
+            let data = image
+                .encode_to_data_with_quality(EncodedImageFormat::PNG, 100)
+                .ok_or(SkiaDirectError::Encode)?;
+            let encode_duration = encode_started.elapsed();
+            let copy_started = Instant::now();
+            let bytes = data.as_bytes().to_vec();
+            (
+                bytes,
+                encode_duration,
+                copy_started.elapsed(),
+                png_encoder.name(),
+            )
+        }
+        SkiaImageFormat::Jpeg { quality } => {
+            let image = surface.image_snapshot();
+            let encode_started = Instant::now();
+            #[allow(deprecated)]
+            let data = image
+                .encode_to_data_with_quality(EncodedImageFormat::JPEG, quality.min(100) as u32)
+                .ok_or(SkiaDirectError::Encode)?;
+            let encode_duration = encode_started.elapsed();
+            let copy_started = Instant::now();
+            let bytes = data.as_bytes().to_vec();
+            (bytes, encode_duration, copy_started.elapsed(), "skia-jpeg")
+        }
     };
-    let encode_started = Instant::now();
-    #[allow(deprecated)]
-    let data = image
-        .encode_to_data_with_quality(encoded_format, quality)
-        .ok_or(SkiaDirectError::Encode)?;
-    let encode_duration = encode_started.elapsed();
-    let copy_started = Instant::now();
-    let bytes = data.as_bytes().to_vec();
-    let copy_duration = copy_started.elapsed();
-    Ok(SkiaImageOutput {
+    let output = SkiaImageOutput {
         bytes,
         stats: SkiaRenderStats {
-            layout: layout_duration,
+            layout: prepared.layout_duration,
             setup: setup_duration,
             draw: draw_duration,
             encode: encode_duration,
             copy: copy_duration,
             total: total_started.elapsed(),
         },
+    };
+    log_profile(
+        encoder_name,
+        prepared.width,
+        prepared.height,
+        output.bytes.len(),
+        &output.stats,
+    );
+    Ok(output)
+}
+
+fn log_profile(encoder: &str, width: i32, height: i32, bytes: usize, stats: &SkiaRenderStats) {
+    if profile_enabled() {
+        eprintln!(
+            "pjsekai_scores_rs.profile encoder={} image={}x{} bytes={} layout={:.4}s setup={:.4}s draw={:.4}s encode={:.4}s copy={:.4}s total={:.4}s",
+            encoder,
+            width,
+            height,
+            bytes,
+            stats.layout.as_secs_f64(),
+            stats.setup.as_secs_f64(),
+            stats.draw.as_secs_f64(),
+            stats.encode.as_secs_f64(),
+            stats.copy.as_secs_f64(),
+            stats.total.as_secs_f64(),
+        );
+    }
+}
+
+fn profile_enabled() -> bool {
+    *PROFILE_ENABLED.get_or_init(|| {
+        std::env::var("PJSEKAI_SCORES_PROFILE")
+            .ok()
+            .is_some_and(|value| !matches!(value.as_str(), "" | "0" | "false" | "False"))
     })
+}
+
+fn encode_surface_mtpng(surface: &mut Surface) -> Result<Vec<u8>, SkiaDirectError> {
+    let width = surface.width();
+    let height = surface.height();
+    let row_bytes = width as usize * 4;
+    let mut pixels = vec![0_u8; row_bytes * height as usize];
+    let info = ImageInfo::new(
+        (width, height),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    if !surface.read_pixels(&info, &mut pixels, row_bytes, (0, 0)) {
+        return Err(SkiaDirectError::Encode);
+    }
+
+    let mut header = MtpngHeader::new();
+    header
+        .set_size(width as u32, height as u32)
+        .map_err(|_| SkiaDirectError::Encode)?;
+    header
+        .set_color(MtpngColorType::TruecolorAlpha, 8)
+        .map_err(|_| SkiaDirectError::Encode)?;
+    let mut options = MtpngOptions::new();
+    options
+        .set_compression_level(CompressionLevel::Fast)
+        .map_err(|_| SkiaDirectError::Encode)?;
+    let mut encoder = MtpngEncoder::new(Vec::new(), &options);
+    encoder
+        .write_header(&header)
+        .map_err(|_| SkiaDirectError::Encode)?;
+    encoder
+        .write_image_rows(&pixels)
+        .map_err(|_| SkiaDirectError::Encode)?;
+    encoder.finish().map_err(|_| SkiaDirectError::Encode)
 }
 
 struct Layout {
@@ -3330,7 +3589,71 @@ fn format_g(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_css_body, parse_font_families};
+    use super::{
+        SkiaRasterColorType, encode_surface_mtpng, parse_css_body, parse_font_families,
+        score_to_skia_raster,
+    };
+    use crate::Drawing;
+    use crate::score_json::parse_score_json;
+    use skia_safe::{
+        AlphaType, Color, ColorType, Data, Image, ImageInfo, Paint, Rect, image::CachingHint,
+        surfaces,
+    };
+
+    #[test]
+    fn mtpng_round_trips_unpremultiplied_rgba_pixels() {
+        let mut surface = surfaces::raster_n32_premul((3, 2)).expect("surface");
+        surface.canvas().clear(Color::TRANSPARENT);
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_argb(127, 20, 80, 140));
+        surface
+            .canvas()
+            .draw_rect(Rect::from_xywh(0.0, 0.0, 2.0, 2.0), &paint);
+        paint.set_color(Color::from_argb(255, 240, 10, 60));
+        surface
+            .canvas()
+            .draw_rect(Rect::from_xywh(2.0, 0.0, 1.0, 1.0), &paint);
+
+        let info = ImageInfo::new((3, 2), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let mut expected = vec![0_u8; 3 * 2 * 4];
+        assert!(surface.read_pixels(&info, &mut expected, 3 * 4, (0, 0)));
+
+        let encoded = encode_surface_mtpng(&mut surface).expect("mtpng encode");
+        let decoded = Image::from_encoded(Data::new_copy(&encoded)).expect("PNG decode");
+        let mut actual = vec![0_u8; expected.len()];
+        assert!(decoded.read_pixels(&info, &mut actual, 3 * 4, (0, 0), CachingHint::Disallow,));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn raster_output_owns_native_premultiplied_pixels() {
+        let mut score = parse_score_json(
+            r#"{
+                "MusicScoreEventDataList": [
+                    {"id": 1, "ticks": 0, "eventType": 0, "changeValue": 120}
+                ],
+                "NoteList": []
+            }"#,
+        )
+        .expect("score");
+        let mut drawing = Drawing::new(None, None, false, None, None, None);
+
+        let raster = score_to_skia_raster(&mut drawing, &mut score, None).expect("raster");
+
+        assert!(raster.width > 0);
+        assert!(raster.height > 0);
+        assert!(raster.row_bytes >= raster.width as usize * 4);
+        assert_eq!(
+            raster.pixels.len(),
+            raster.row_bytes * raster.height as usize
+        );
+        assert!(matches!(
+            raster.color_type,
+            SkiaRasterColorType::Rgba8888 | SkiaRasterColorType::Bgra8888
+        ));
+        assert_eq!(raster.stats.encode, std::time::Duration::ZERO);
+        assert_eq!(raster.stats.copy, std::time::Duration::ZERO);
+    }
 
     #[test]
     fn parses_unquoted_rodin_font_family() {

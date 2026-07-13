@@ -5,6 +5,18 @@ use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 use pyo3::types::PyModule;
 
+#[cfg(feature = "skia-image")]
+use std::ffi::{c_char, c_void};
+#[cfg(feature = "skia-image")]
+use std::os::raw::c_int;
+#[cfg(feature = "skia-image")]
+use std::ptr;
+
+#[cfg(feature = "skia-image")]
+use pyo3::exceptions::PyBufferError;
+#[cfg(feature = "skia-image")]
+use pyo3::ffi;
+
 use crate::drawing::{Drawing, MusicMeta};
 use crate::fraction::Fraction;
 use crate::lyric::Lyric;
@@ -140,6 +152,17 @@ fn render_png_bytes(
 ) -> PyResult<Vec<u8>> {
     crate::score_to_skia_png(drawing, score, lyric).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to render PNG: {e}"))
+    })
+}
+
+#[cfg(feature = "skia-image")]
+fn render_raster(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+) -> PyResult<crate::SkiaRasterOutput> {
+    crate::score_to_skia_raster(drawing, score, lyric).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to render raster image: {e}"))
     })
 }
 
@@ -645,6 +668,105 @@ impl PyRebase {
     }
 }
 
+#[cfg(feature = "skia-image")]
+#[pyclass(name = "RasterImage", frozen)]
+struct PyRasterImage {
+    inner: crate::SkiaRasterOutput,
+}
+
+#[cfg(feature = "skia-image")]
+#[pymethods]
+impl PyRasterImage {
+    #[getter]
+    fn width(&self) -> i32 {
+        self.inner.width
+    }
+
+    #[getter]
+    fn height(&self) -> i32 {
+        self.inner.height
+    }
+
+    #[getter]
+    fn row_bytes(&self) -> usize {
+        self.inner.row_bytes
+    }
+
+    #[getter]
+    fn color_type(&self) -> &'static str {
+        self.inner.color_type.as_str()
+    }
+
+    #[getter]
+    fn alpha_type(&self) -> &'static str {
+        "premul"
+    }
+
+    #[getter]
+    fn nbytes(&self) -> usize {
+        self.inner.pixels.len()
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.pixels.len()
+    }
+
+    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.inner.pixels)
+    }
+
+    unsafe fn __getbuffer__(
+        slf: Bound<'_, Self>,
+        view: *mut ffi::Py_buffer,
+        flags: c_int,
+    ) -> PyResult<()> {
+        unsafe { fill_readonly_buffer(view, flags, &slf.borrow().inner.pixels, slf.into_any()) }
+    }
+}
+
+#[cfg(feature = "skia-image")]
+unsafe fn fill_readonly_buffer(
+    view: *mut ffi::Py_buffer,
+    flags: c_int,
+    data: &[u8],
+    owner: Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if view.is_null() {
+        return Err(PyBufferError::new_err("buffer view is null"));
+    }
+    if (flags & ffi::PyBUF_WRITABLE) == ffi::PyBUF_WRITABLE {
+        return Err(PyBufferError::new_err("RasterImage is read-only"));
+    }
+
+    const U8_BUFFER_FORMAT: &[u8; 2] = b"B\0";
+    unsafe {
+        (*view).obj = owner.into_ptr();
+        (*view).buf = data.as_ptr() as *mut c_void;
+        (*view).len = data.len() as isize;
+        (*view).readonly = 1;
+        (*view).itemsize = 1;
+        (*view).format = if (flags & ffi::PyBUF_FORMAT) == ffi::PyBUF_FORMAT {
+            U8_BUFFER_FORMAT.as_ptr() as *mut c_char
+        } else {
+            ptr::null_mut()
+        };
+        (*view).ndim = 1;
+        (*view).shape = if (flags & ffi::PyBUF_ND) == ffi::PyBUF_ND {
+            &mut (*view).len
+        } else {
+            ptr::null_mut()
+        };
+        (*view).strides = if (flags & ffi::PyBUF_STRIDES) == ffi::PyBUF_STRIDES {
+            &mut (*view).itemsize
+        } else {
+            ptr::null_mut()
+        };
+        (*view).suboffsets = ptr::null_mut();
+        (*view).internal = ptr::null_mut();
+    }
+    Ok(())
+}
+
 /// Python wrapper for Drawing
 #[pyclass(name = "Drawing")]
 struct PyDrawing {
@@ -737,6 +859,30 @@ impl PyDrawing {
         };
 
         Ok(PyBytes::new(py, &bytes))
+    }
+
+    /// Render into a read-only native N32 premultiplied pixel buffer without encoding.
+    #[cfg(feature = "skia-image")]
+    #[pyo3(signature = (score=None, lyric=None))]
+    fn raster(
+        &mut self,
+        score: Option<PyRefMut<'_, PyScore>>,
+        lyric: Option<PyRef<'_, PyLyric>>,
+    ) -> PyResult<PyRasterImage> {
+        let lyric_override = lyric.map(|lyric| lyric.inner.clone());
+        let inner = if let Some(mut score) = score {
+            let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
+            render_raster(&mut self.inner, &mut score.inner, lyric_ref)?
+        } else {
+            let mut stored_score = self.stored_score.clone().ok_or_else(|| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "score is required when Drawing was created without one",
+                )
+            })?;
+            let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
+            render_raster(&mut self.inner, &mut stored_score, lyric_ref)?
+        };
+        Ok(PyRasterImage { inner })
     }
 
     /// Generate JPEG bytes from a score via direct Skia rendering
@@ -1122,6 +1268,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLyric>()?;
     m.add_class::<PyRebase>()?;
     m.add_class::<PyDrawing>()?;
+    #[cfg(feature = "skia-image")]
+    m.add_class::<PyRasterImage>()?;
     m.add_function(wrap_pyfunction!(sus_to_svg, m)?)?;
     m.add_function(wrap_pyfunction!(sus_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(sus_to_jpg, m)?)?;

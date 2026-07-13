@@ -153,6 +153,7 @@ The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build
 - **Do not rename `notes.rs` back to `notes/mod.rs`** — the module root lives at `src/notes.rs`; submodules stay in `src/notes/`.
 - **Do not rely on host-installed fonts for deployed Skia output** — expose/pass font files or directories instead.
 - **Do not point `font_dirs` at broad asset roots in performance-sensitive services** unless that scan cost is acceptable. Prefer known `font_paths`.
+- **Do not make `RasterImage` writable** — `Drawing.raster()` is borrowed across free-threaded extension boundaries, so its buffer must remain immutable and alive for the full consumer view.
 
 ---
 
@@ -161,6 +162,7 @@ The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build
 - Release commits and release tags must be GPG-signed. Verify with `git log -1 --show-signature` and `git tag -v vX.Y.Z`.
 - A GitHub Release/tag triggers three release workflows: Crate, CLI, and Python. Check all three, especially the `pjsekai-scores-rs-skia-image` Python publish job.
 - For Skia/font/API changes, run `cargo check --features 'python skia-image'` and `cargo test --features skia-image` before release.
+- For `RasterImage` changes, also build the Skia Python wheel and verify `memoryview(raster).readonly` plus the downstream zero-copy consumer path.
 - When changing CLI/Python options, update `README.md`, `AGENTS.md`, and `CLAUDE.md` in the same docs pass.
 
 ---

@@ -53,12 +53,14 @@ Direct `String` building via `std::fmt::Write` — no DOM library. CSS themes ar
 ### Skia image rendering (`skia_direct.rs`)
 Direct PNG/JPEG output is behind the `skia-image` feature. It parses CSS colors, `font-size`, `font-weight`, and `font-family` from the built-in theme plus runtime `style_sheet`. CLI `--font-path` / `--font-dir` and Python `font_paths` / `font_dirs` load custom `.ttf`, `.otf`, and `.ttc` fonts for Skia output only; SVG output still leaves font resolution to the viewer.
 
+`Drawing.raster()` is the zero-copy service integration API: it renders into a `RasterImage`-owned native N32 premultiplied buffer and exposes a read-only Python buffer view. Keep this buffer immutable and owned for the full consumer borrow; use PNG/JPEG when the output must cross a process or network boundary.
+
 Prefer explicit font files in services. `font_dirs` are recursive and can be expensive when pointed at broad asset roots. Custom typefaces are cached per process by sorted font path, modified time, and file size, so repeated Python API renders should not reread the same CJK/JP fonts.
 
 CSS family lookup uses localized family names, Skia family names, and PostScript names after normalization. This is why names like `Source Han Sans SC` and `FOT-RodinNTLG Pro DB` can work when those font files are passed in. For CJK text, candidate typefaces must cover the required glyphs before selection.
 
 ### `python.rs` is a thin binding layer
-All business logic lives in the core modules. `python.rs` only wraps types for PyO3. Keep `font_paths` / `font_dirs` available on `Drawing`, `score_to_svg/png/jpg/jpeg`, and the backward-compatible `sus_to_*` helpers when adjusting rendering arguments.
+All business logic lives in the core modules. `python.rs` only wraps types for PyO3. Keep `font_paths` / `font_dirs` available on `Drawing`, `score_to_svg/png/jpg/jpeg`, and the backward-compatible `sus_to_*` helpers when adjusting rendering arguments. `RasterImage` must remain read-only and buffer-protocol compatible so free-threaded consumers can borrow its pixels safely.
 
 ### `wasm.rs` is a thin binding layer
 Keep wasm-only glue in `wasm.rs` and route behavior through the core `Score`, `Drawing`, `Rebase`, and `Lyric` types. The wasm API should stay independent from the `python` and `skia-image` features.

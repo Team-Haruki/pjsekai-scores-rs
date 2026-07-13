@@ -27,8 +27,9 @@ pub use score_json::ScoreJsonError;
 
 #[cfg(feature = "skia-image")]
 pub use skia_direct::{
-    SkiaDirectError, SkiaImageFormat, SkiaImageOutput, SkiaRenderStats, score_to_skia_image,
-    score_to_skia_image_with_stats, score_to_skia_jpeg, score_to_skia_png,
+    PngEncoder, SkiaDirectError, SkiaImageFormat, SkiaImageOutput, SkiaRasterColorType,
+    SkiaRasterOutput, SkiaRenderStats, score_to_skia_image, score_to_skia_image_with_stats,
+    score_to_skia_jpeg, score_to_skia_png, score_to_skia_png_with_encoder, score_to_skia_raster,
 };
 
 /// Python bindings via PyO3 (only compiled with `--features python`)
