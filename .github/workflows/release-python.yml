@@ -57,7 +57,7 @@ jobs:
 
   # ──────────────────────────────────────────────
   # Build free-threaded wheels for Linux (x86_64, aarch64)
-  # manylinux_2_28 containers include 3.13t / 3.14t
+  # manylinux_2_28 containers include free-threaded Python 3.14t.
   # aarch64 already gets free-threaded via manylinux auto;
   # only x86_64 needs the manylinux_2_28 container.
   # ──────────────────────────────────────────────
@@ -89,7 +89,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist --interpreter python3.13t python3.14t --features ${{ matrix.package.features }}
+          args: --release --out dist --interpreter python3.14t --features ${{ matrix.package.features }}
           sccache: "true"
           manylinux: manylinux_2_28
           before-script-linux: ${{ matrix.package.artifact == 'skia-image' && format('bash .github/scripts/install-skia-linux-deps.sh {0}', matrix.target) || '' }}
