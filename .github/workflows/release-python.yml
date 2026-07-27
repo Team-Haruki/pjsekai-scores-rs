@@ -127,7 +127,7 @@ jobs:
           MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
           RELEASE_TAG: ${{ github.event_name == 'release' && github.ref_name || inputs.release_tag }}
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: |
             3.9
@@ -178,7 +178,7 @@ jobs:
           MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
           RELEASE_TAG: ${{ github.event_name == 'release' && github.ref_name || inputs.release_tag }}
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: |
             3.9
