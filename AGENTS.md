@@ -55,9 +55,10 @@ src/
 ├── meta.rs         Score metadata struct
 ├── line.rs         .sus format line parser (LazyLock regexes, base36 decode)
 ├── score.rs        Score + 3-pass note-linking + get_time() timing engine
+├── score_json.rs   Project SEKAI custom chart JSON parser (serde_json → Score)
 ├── lyric.rs        Lyric/Word parser
 ├── rebase.rs       BPM/timing rebase transformation
-├── drawing.rs      SVG renderer — direct String building, ~750 lines
+├── drawing.rs      SVG renderer — direct String building, ~1750 lines
 ├── skia_direct.rs  Direct Skia PNG/JPEG renderer + CSS/font handling
 ├── python.rs       All PyO3 bindings (PyScore, PyDrawing, PyRebase, PyLyric, PyEvent)
 ├── wasm.rs         wasm-bindgen bindings (Score, Drawing, Rebase, Lyric; SVG only)
@@ -125,7 +126,7 @@ The literal `href="#` contains `"#` which prematurely closes `r#"..."#` raw stri
 All PyO3 code is behind `#[cfg(feature = "python")]`. The crate builds as a pure Rust library + CLI without it.
 
 ### Free-threaded Python (3.13t / 3.14t)
-All `#[pyclass]` types own their data (no `Rc`/`RefCell`) so they are `Send + Sync` automatically. PyO3 0.28.2 supports free-threaded Python natively.
+All `#[pyclass]` types own their data (no `Rc`/`RefCell`) so they are `Send + Sync` automatically. PyO3 0.29 supports free-threaded Python natively.
 
 ### Windows cross-compilation
 The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build time, removing the need for a Windows Python installation when cross-compiling.
@@ -191,7 +192,7 @@ Rules:
 - No trailing period.
 - Keep the subject at or below roughly 70 characters.
 - **Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form `Agent:` line.** This makes GitHub render the co-author avatar on the commit page. The trailer must be on its own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`. Suggested values per agent:
-  - Claude (any 4.x): `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
+  - Claude (any model): `Co-authored-by: Claude Fable 5 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Opus 4.7`, `Claude Sonnet 4.6`, `Claude Haiku 4.5`)
   - Codex: `Co-authored-by: Codex <noreply@openai.com>`
   - Copilot: `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>`
 
