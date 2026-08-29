@@ -10,15 +10,14 @@ on:
         required: false
         type: string
 
-permissions:
-  contents: read
-
 jobs:
   # ──────────────────────────────────────────────
   # Build wheels for Linux (x86_64, aarch64)
   # ──────────────────────────────────────────────
   linux:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +41,7 @@ jobs:
           MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
           RELEASE_TAG: ${{ github.event_name == 'release' && github.ref_name || inputs.release_tag }}
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter --features ${{ matrix.package.features }}
@@ -63,6 +62,8 @@ jobs:
   # ──────────────────────────────────────────────
   linux-freethreaded:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -86,7 +87,7 @@ jobs:
           MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
           RELEASE_TAG: ${{ github.event_name == 'release' && github.ref_name || inputs.release_tag }}
       - name: Build free-threaded wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --interpreter python3.14t --features ${{ matrix.package.features }}
@@ -104,6 +105,8 @@ jobs:
   # ──────────────────────────────────────────────
   macos:
     runs-on: macos-15
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -139,7 +142,7 @@ jobs:
             3.14t
           allow-prereleases: true
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --find-interpreter --features ${{ matrix.package.features }}
@@ -155,6 +158,8 @@ jobs:
   # ──────────────────────────────────────────────
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -190,7 +195,7 @@ jobs:
             3.14t
           allow-prereleases: true
       - name: Build wheels
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           target: x64
           args: --release --out dist --find-interpreter --features ${{ matrix.package.features }}
@@ -206,6 +211,8 @@ jobs:
   # ──────────────────────────────────────────────
   sdist:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -226,7 +233,7 @@ jobs:
           MATURIN_FEATURES_TOML: ${{ matrix.package.pyproject_features }}
           RELEASE_TAG: ${{ github.event_name == 'release' && github.ref_name || inputs.release_tag }}
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
         with:
           command: sdist
           args: --out dist

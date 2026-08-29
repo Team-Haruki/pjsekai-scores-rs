@@ -11,7 +11,7 @@
 .bar-count-text {
     font-size: 12px;
     font-weight: 900;
-    font-family: Avenir;
+    font-family: Avenir, sans-serif;
     fill: #ffffff;
     text-anchor: start;
 }
@@ -34,7 +34,7 @@
 .event-text {
     font-size: 12px;
     font-weight: 900;
-    font-family: Avenir;
+    font-family: Avenir, sans-serif;
     fill: #fee300;
     text-anchor: start;
 }
@@ -46,14 +46,14 @@
 
 .speed-text {
     font-size: 12px;
-    font-family: Avenir;
+    font-family: Avenir, sans-serif;
     fill: #ff33ff;
     text-anchor: end;
 }
 
 .lyric-text {
     font-size: 12px;
-    font-family: ヒラギノ角ゴシック;
+    font-family: ヒラギノ角ゴシック, sans-serif;
     fill: #ffffff;
     text-anchor: start;
 }
@@ -86,7 +86,7 @@
 
 .tick-text {
     font-size: 12px;
-    font-family: Avenir;
+    font-family: Avenir, sans-serif;
     fill: #e2e2e2;
     text-anchor: end;
 }
@@ -104,7 +104,7 @@
 .title {
     font-size: 96px;
     font-weight: 900;
-    font-family: ヒラギノ角ゴシック;
+    font-family: ヒラギノ角ゴシック, sans-serif;
     fill: #ffffff;
     text-anchor: start;
 }
@@ -112,7 +112,7 @@
 .subtitle {
     font-size: 48px;
     font-weight: 700;
-    font-family: ヒラギノ角ゴシック;
+    font-family: ヒラギノ角ゴシック, sans-serif;
     fill: #ffffff;
     text-anchor: start;
 }
@@ -146,7 +146,7 @@
 .skill-score {
     font-size: 38px;
     /*font-weight: 900;*/
-    font-family: Osaka;
+    font-family: Osaka, sans-serif;
     fill: white;
     text-anchor: start;
     /*text-shadow: black 0.1em 0.1em 0.2em;*/
