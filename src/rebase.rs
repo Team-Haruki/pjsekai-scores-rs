@@ -26,52 +26,16 @@ impl Rebase {
     /// Load from a serde_json::Value
     pub fn from_value(v: &Value) -> Rebase {
         let offset = v.get("offset").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
-        let events: Vec<Event> = v
+        let events = v
             .get("events")
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .map(|ev| {
-                        let mut event = Event::new(Fraction::from_f64(
-                            ev.get("bar").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        ));
-                        if let Some(bpm) = ev.get("bpm").and_then(|v| v.as_f64()) {
-                            event.bpm = Some(Fraction::from_f64(bpm));
-                        }
-                        if let Some(bl) = ev.get("barLength").and_then(|v| v.as_f64()) {
-                            event.bar_length = Some(Fraction::from_f64(bl));
-                        }
-                        if let Some(sl) = ev.get("sentenceLength").and_then(|v| v.as_i64()) {
-                            event.sentence_length = Some(sl as i32);
-                        }
-                        if let Some(section) = ev.get("section").and_then(|v| v.as_str()) {
-                            event.section = Some(section.to_string());
-                        }
-                        if let Some(text) = ev.get("text").and_then(|v| v.as_str()) {
-                            event.text = Some(text.to_string());
-                        }
-                        event
-                    })
-                    .collect()
-            })
+            .map(|events| events.iter().map(rebase_event_from_value).collect())
             .unwrap_or_default();
-
-        let mut meta = Meta::new();
-        if let Some(meta_obj) = v.get("meta").and_then(|v| v.as_object()) {
-            for (k, val) in meta_obj {
-                if let Some(s) = val.as_str() {
-                    meta.set_field(k, s);
-                } else if let Some(f) = val.as_f64() {
-                    meta.set_field(k, &f.to_string());
-                }
-            }
-        }
 
         Rebase {
             offset,
             events,
-            meta,
+            meta: rebase_meta_from_value(v),
         }
     }
 
@@ -85,147 +49,20 @@ impl Rebase {
         let active_notes = source.active_notes.clone();
         let notes_snapshot = source.notes.clone();
 
-        // Pre-compute all source times we need
-        let mut bar_to_time: std::collections::HashMap<Fraction, Fraction> =
-            std::collections::HashMap::new();
-        for &note_idx in &active_notes {
-            let note = &notes_snapshot[note_idx];
-            let bar = note.bar();
-            bar_to_time
-                .entry(bar)
-                .or_insert_with(|| source.get_time(bar));
-            // Also handle linked notes
-            match note {
-                NoteData::Directional(_, dir) if dir.tap_idx != NO_NOTE => {
-                    let tb = notes_snapshot[dir.tap_idx].bar();
-                    bar_to_time.entry(tb).or_insert_with(|| source.get_time(tb));
-                }
-                NoteData::Slide(_, slide) => {
-                    if slide.tap_idx != NO_NOTE {
-                        let tb = notes_snapshot[slide.tap_idx].bar();
-                        bar_to_time.entry(tb).or_insert_with(|| source.get_time(tb));
-                    }
-                    if slide.directional_idx != NO_NOTE {
-                        let db = notes_snapshot[slide.directional_idx].bar();
-                        bar_to_time.entry(db).or_insert_with(|| source.get_time(db));
-                        if let Some(d) = notes_snapshot[slide.directional_idx].as_directional()
-                            && d.tap_idx != NO_NOTE
-                            && d.tap_idx != slide.tap_idx
-                        {
-                            let dtb = notes_snapshot[d.tap_idx].bar();
-                            bar_to_time
-                                .entry(dtb)
-                                .or_insert_with(|| source.get_time(dtb));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let rebase_bar = |bar: Fraction, score: &mut Score| -> Fraction {
-            let source_time = bar_to_time
-                .get(&bar)
-                .copied()
-                .unwrap_or_else(Fraction::zero)
-                .to_f64();
-            score.get_bar_by_time(source_time - self.offset)
-        };
+        let bar_to_time = collect_source_times(source, &active_notes, &notes_snapshot);
 
         // Rebase each note
         for &note_idx in &active_notes {
-            let note = &notes_snapshot[note_idx];
-            match note {
-                NoteData::Tap(base, _tap) => {
-                    let new_bar = rebase_bar(base.bar, &mut score);
-                    score.notes.push(NoteData::Tap(
-                        NoteBase::new(new_bar, base.lane, base.width, base.note_type),
-                        Tap,
-                    ));
-                }
-                NoteData::Directional(base, dir) => {
-                    let new_bar = rebase_bar(base.bar, &mut score);
-                    score.notes.push(NoteData::Directional(
-                        NoteBase::new(new_bar, base.lane, base.width, base.note_type),
-                        Directional::new(),
-                    ));
-                    if dir.tap_idx != NO_NOTE {
-                        let tap_base = notes_snapshot[dir.tap_idx].base();
-                        let tap_bar = rebase_bar(tap_base.bar, &mut score);
-                        score.notes.push(NoteData::Tap(
-                            NoteBase::new(
-                                tap_bar,
-                                tap_base.lane,
-                                tap_base.width,
-                                tap_base.note_type,
-                            ),
-                            Tap,
-                        ));
-                    }
-                }
-                NoteData::Slide(base, slide) => {
-                    let new_bar = rebase_bar(base.bar, &mut score);
-                    score.notes.push(NoteData::Slide(
-                        NoteBase::new(new_bar, base.lane, base.width, base.note_type),
-                        Slide::new(slide.channel, slide.decoration),
-                    ));
-                    if slide.tap_idx != NO_NOTE {
-                        let tap_base = notes_snapshot[slide.tap_idx].base();
-                        let tap_bar = rebase_bar(tap_base.bar, &mut score);
-                        score.notes.push(NoteData::Tap(
-                            NoteBase::new(
-                                tap_bar,
-                                tap_base.lane,
-                                tap_base.width,
-                                tap_base.note_type,
-                            ),
-                            Tap,
-                        ));
-                    }
-                    if slide.directional_idx != NO_NOTE {
-                        let dir_base = notes_snapshot[slide.directional_idx].base();
-                        let dir_bar = rebase_bar(dir_base.bar, &mut score);
-                        score.notes.push(NoteData::Directional(
-                            NoteBase::new(
-                                dir_bar,
-                                dir_base.lane,
-                                dir_base.width,
-                                dir_base.note_type,
-                            ),
-                            Directional::new(),
-                        ));
-                        if let Some(d) = notes_snapshot[slide.directional_idx].as_directional()
-                            && d.tap_idx != NO_NOTE
-                            && d.tap_idx != slide.tap_idx
-                        {
-                            let dt_base = notes_snapshot[d.tap_idx].base();
-                            let dt_bar = rebase_bar(dt_base.bar, &mut score);
-                            score.notes.push(NoteData::Tap(
-                                NoteBase::new(
-                                    dt_bar,
-                                    dt_base.lane,
-                                    dt_base.width,
-                                    dt_base.note_type,
-                                ),
-                                Tap,
-                            ));
-                        }
-                    }
-                }
-            }
+            push_rebased_note(
+                &notes_snapshot[note_idx],
+                &notes_snapshot,
+                &bar_to_time,
+                self.offset,
+                &mut score,
+            );
         }
 
-        // Rebase speed/text events from source
-        let source_events = source.events.clone();
-        for event in &source_events {
-            if event.speed.is_some() || event.text.is_some() {
-                let source_time = source.get_time(event.bar).to_f64();
-                let new_bar = score.get_bar_by_time(source_time - self.offset);
-                let mut new_event = event.clone();
-                new_event.bar = new_bar;
-                score.events.push(new_event);
-            }
-        }
+        push_rebased_source_events(source, self.offset, &mut score);
         score.events.sort_by(|a, b| {
             a.bar
                 .partial_cmp(&b.bar)
@@ -242,5 +79,223 @@ impl Rebase {
         score.init_events();
 
         score
+    }
+}
+
+fn rebase_event_from_value(value: &Value) -> Event {
+    let mut event = Event::new(Fraction::from_f64(
+        value.get("bar").and_then(Value::as_f64).unwrap_or(0.0),
+    ));
+    event.bpm = value
+        .get("bpm")
+        .and_then(Value::as_f64)
+        .map(Fraction::from_f64);
+    event.bar_length = value
+        .get("barLength")
+        .and_then(Value::as_f64)
+        .map(Fraction::from_f64);
+    event.sentence_length = value
+        .get("sentenceLength")
+        .and_then(Value::as_i64)
+        .map(|length| length as i32);
+    event.section = value
+        .get("section")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    event.text = value.get("text").and_then(Value::as_str).map(str::to_owned);
+    event
+}
+
+fn rebase_meta_from_value(value: &Value) -> Meta {
+    let mut meta = Meta::new();
+    let Some(fields) = value.get("meta").and_then(Value::as_object) else {
+        return meta;
+    };
+    for (name, value) in fields {
+        if let Some(text) = value.as_str() {
+            meta.set_field(name, text);
+        } else if let Some(number) = value.as_f64() {
+            meta.set_field(name, &number.to_string());
+        }
+    }
+    meta
+}
+
+fn collect_source_times(
+    source: &mut Score,
+    active_notes: &[usize],
+    notes: &[NoteData],
+) -> std::collections::HashMap<Fraction, Fraction> {
+    let mut times = std::collections::HashMap::new();
+    for &note_idx in active_notes {
+        for bar in referenced_note_bars(&notes[note_idx], notes) {
+            times.entry(bar).or_insert_with(|| source.get_time(bar));
+        }
+    }
+    times
+}
+
+fn referenced_note_bars(note: &NoteData, notes: &[NoteData]) -> Vec<Fraction> {
+    let mut bars = vec![note.bar()];
+    match note {
+        NoteData::Tap(..) => {}
+        NoteData::Directional(_, directional) => {
+            push_indexed_bar(&mut bars, directional.tap_idx, notes);
+        }
+        NoteData::Slide(_, slide) => append_slide_bars(&mut bars, slide, notes),
+    }
+    bars
+}
+
+fn append_slide_bars(bars: &mut Vec<Fraction>, slide: &Slide, notes: &[NoteData]) {
+    push_indexed_bar(bars, slide.tap_idx, notes);
+    push_indexed_bar(bars, slide.directional_idx, notes);
+    let Some(directional) = indexed_directional(slide.directional_idx, notes) else {
+        return;
+    };
+    if directional.tap_idx != slide.tap_idx {
+        push_indexed_bar(bars, directional.tap_idx, notes);
+    }
+}
+
+fn push_indexed_bar(bars: &mut Vec<Fraction>, note_idx: usize, notes: &[NoteData]) {
+    if note_idx != NO_NOTE {
+        bars.push(notes[note_idx].bar());
+    }
+}
+
+fn indexed_directional(note_idx: usize, notes: &[NoteData]) -> Option<&Directional> {
+    (note_idx != NO_NOTE)
+        .then(|| notes[note_idx].as_directional())
+        .flatten()
+}
+
+fn rebase_bar(
+    bar: Fraction,
+    bar_to_time: &std::collections::HashMap<Fraction, Fraction>,
+    offset: f64,
+    score: &mut Score,
+) -> Fraction {
+    let source_time = bar_to_time
+        .get(&bar)
+        .copied()
+        .unwrap_or_else(Fraction::zero)
+        .to_f64();
+    score.get_bar_by_time(source_time - offset)
+}
+
+fn rebased_base(
+    base: &NoteBase,
+    bar_to_time: &std::collections::HashMap<Fraction, Fraction>,
+    offset: f64,
+    score: &mut Score,
+) -> NoteBase {
+    NoteBase::new(
+        rebase_bar(base.bar, bar_to_time, offset, score),
+        base.lane,
+        base.width,
+        base.note_type,
+    )
+}
+
+fn push_rebased_note(
+    note: &NoteData,
+    notes: &[NoteData],
+    bar_to_time: &std::collections::HashMap<Fraction, Fraction>,
+    offset: f64,
+    score: &mut Score,
+) {
+    match note {
+        NoteData::Tap(base, _) => push_rebased_tap(base, bar_to_time, offset, score),
+        NoteData::Directional(base, directional) => {
+            push_rebased_directional(base, bar_to_time, offset, score);
+            push_rebased_tap_index(directional.tap_idx, notes, bar_to_time, offset, score);
+        }
+        NoteData::Slide(base, slide) => {
+            push_rebased_slide(base, slide, bar_to_time, offset, score);
+            push_slide_attachments(slide, notes, bar_to_time, offset, score);
+        }
+    }
+}
+
+fn push_rebased_tap(
+    base: &NoteBase,
+    bar_to_time: &std::collections::HashMap<Fraction, Fraction>,
+    offset: f64,
+    score: &mut Score,
+) {
+    let base = rebased_base(base, bar_to_time, offset, score);
+    score.notes.push(NoteData::Tap(base, Tap));
+}
+
+fn push_rebased_tap_index(
+    note_idx: usize,
+    notes: &[NoteData],
+    bar_to_time: &std::collections::HashMap<Fraction, Fraction>,
+    offset: f64,
+    score: &mut Score,
+) {
+    if note_idx != NO_NOTE {
+        push_rebased_tap(notes[note_idx].base(), bar_to_time, offset, score);
+    }
+}
+
+fn push_rebased_directional(
+    base: &NoteBase,
+    bar_to_time: &std::collections::HashMap<Fraction, Fraction>,
+    offset: f64,
+    score: &mut Score,
+) {
+    let base = rebased_base(base, bar_to_time, offset, score);
+    score
+        .notes
+        .push(NoteData::Directional(base, Directional::new()));
+}
+
+fn push_rebased_slide(
+    base: &NoteBase,
+    slide: &Slide,
+    bar_to_time: &std::collections::HashMap<Fraction, Fraction>,
+    offset: f64,
+    score: &mut Score,
+) {
+    let base = rebased_base(base, bar_to_time, offset, score);
+    score.notes.push(NoteData::Slide(
+        base,
+        Slide::new(slide.channel, slide.decoration),
+    ));
+}
+
+fn push_slide_attachments(
+    slide: &Slide,
+    notes: &[NoteData],
+    bar_to_time: &std::collections::HashMap<Fraction, Fraction>,
+    offset: f64,
+    score: &mut Score,
+) {
+    push_rebased_tap_index(slide.tap_idx, notes, bar_to_time, offset, score);
+    let Some(directional) = indexed_directional(slide.directional_idx, notes) else {
+        return;
+    };
+    push_rebased_directional(
+        notes[slide.directional_idx].base(),
+        bar_to_time,
+        offset,
+        score,
+    );
+    if directional.tap_idx != slide.tap_idx {
+        push_rebased_tap_index(directional.tap_idx, notes, bar_to_time, offset, score);
+    }
+}
+
+fn push_rebased_source_events(source: &mut Score, offset: f64, score: &mut Score) {
+    for event in source.events.clone() {
+        if event.speed.is_none() && event.text.is_none() {
+            continue;
+        }
+        let source_time = source.get_time(event.bar).to_f64();
+        let mut event = event;
+        event.bar = score.get_bar_by_time(source_time - offset);
+        score.events.push(event);
     }
 }

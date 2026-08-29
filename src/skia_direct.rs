@@ -838,7 +838,6 @@ impl<'a> DirectRenderer<'a> {
         let cfg = &self.drawing.config;
         let bar_start_f = Fraction::from_integer(segment.start as i64);
         let bar_stop_f = Fraction::from_integer(segment.stop as i64);
-        let chart_height = segment.height - cfg.time_padding as f64 * 2.0;
 
         self.draw_rect(
             canvas,
@@ -859,69 +858,134 @@ impl<'a> DirectRenderer<'a> {
             RGBA::rgb(0xcf, 0xd8, 0xdc),
         );
 
+        self.draw_segment_covers(canvas, score, bar_start_f, bar_stop_f);
+
+        self.draw_segment_grid(canvas, score, segment, bar_stop_f);
+
+        let speed_lines = self.draw_event_labels(canvas, score, segment.start, segment.stop);
+        if let Some(lyric) = lyric {
+            self.draw_lyrics(canvas, score, lyric, bar_start_f, bar_stop_f);
+        }
+
+        self.draw_segment_notes(
+            canvas,
+            score,
+            notes_snapshot,
+            render_index,
+            bar_start_f,
+            bar_stop_f,
+        );
+        self.draw_speed_lines(canvas, speed_lines);
+    }
+
+    fn draw_segment_covers(
+        &self,
+        canvas: &skia_safe::Canvas,
+        score: &mut Score,
+        bar_start: Fraction,
+        bar_stop: Fraction,
+    ) {
         for cover in &self.drawing.special_cover_objects {
             match cover {
                 CoverObject::Text {
                     bar_from,
                     css_class,
                     text,
-                } => {
-                    if *bar_from < bar_start_f - Fraction::from_f64(0.2)
-                        || *bar_from >= bar_stop_f - Fraction::from_f64(0.1)
-                    {
-                        continue;
-                    }
-                    let y = cfg.time_height * score.get_time_delta_f64(*bar_from, bar_stop_f)
-                        + cfg.time_padding as f64;
-                    let x = cfg.lane_width as f64 * cfg.n_lanes as f64
-                        + cfg.lane_padding as f64 * 2.0
-                        - 3.0;
-                    self.draw_rotated_text(
-                        canvas,
-                        text,
-                        x,
-                        y,
-                        x,
-                        y,
-                        css_class,
-                        TextDefaults::new(RGBA::WHITE, 38.0, 400),
-                        TextAnchor::Start,
-                    );
-                }
+                } => self.draw_segment_text_cover(
+                    canvas, score, *bar_from, css_class, text, bar_start, bar_stop,
+                ),
                 CoverObject::Rect {
                     bar_from,
                     css_class,
                     bar_to,
-                } => {
-                    let cover_from = if *bar_from > bar_start_f - Fraction::from_f64(0.2) {
-                        *bar_from
-                    } else {
-                        bar_start_f - Fraction::from_f64(0.2)
-                    };
-                    let cover_to = if *bar_to < bar_stop_f + Fraction::from_f64(0.2) {
-                        *bar_to
-                    } else {
-                        bar_stop_f + Fraction::from_f64(0.2)
-                    };
-                    if cover_to <= cover_from {
-                        continue;
-                    }
-                    let y = cfg.time_height * score.get_time_delta_f64(cover_to, bar_stop_f)
-                        + cfg.time_padding as f64;
-                    let h = cfg.time_height * score.get_time_delta_f64(cover_from, cover_to);
-                    self.draw_rect(
-                        canvas,
-                        cfg.lane_padding as f64,
-                        y,
-                        cfg.lane_width as f64 * cfg.n_lanes as f64,
-                        h,
-                        css_class,
-                        RGBA::rgb(0x78, 0x90, 0x9c),
-                    );
-                }
+                } => self.draw_segment_rect_cover(
+                    canvas, score, *bar_from, *bar_to, css_class, bar_start, bar_stop,
+                ),
             }
         }
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn draw_segment_text_cover(
+        &self,
+        canvas: &skia_safe::Canvas,
+        score: &mut Score,
+        bar_from: Fraction,
+        css_class: &str,
+        text: &str,
+        bar_start: Fraction,
+        bar_stop: Fraction,
+    ) {
+        if bar_from < bar_start - Fraction::from_f64(0.2)
+            || bar_from >= bar_stop - Fraction::from_f64(0.1)
+        {
+            return;
+        }
+        let cfg = &self.drawing.config;
+        let y = cfg.time_height * score.get_time_delta_f64(bar_from, bar_stop)
+            + cfg.time_padding as f64;
+        let x = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64 * 2.0 - 3.0;
+        self.draw_rotated_text(
+            canvas,
+            text,
+            x,
+            y,
+            x,
+            y,
+            css_class,
+            TextDefaults::new(RGBA::WHITE, 38.0, 400),
+            TextAnchor::Start,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_segment_rect_cover(
+        &self,
+        canvas: &skia_safe::Canvas,
+        score: &mut Score,
+        bar_from: Fraction,
+        bar_to: Fraction,
+        css_class: &str,
+        bar_start: Fraction,
+        bar_stop: Fraction,
+    ) {
+        let cover_from = bar_from.max(bar_start - Fraction::from_f64(0.2));
+        let cover_to = bar_to.min(bar_stop + Fraction::from_f64(0.2));
+        if cover_to <= cover_from {
+            return;
+        }
+        let cfg = &self.drawing.config;
+        let y = cfg.time_height * score.get_time_delta_f64(cover_to, bar_stop)
+            + cfg.time_padding as f64;
+        let height = cfg.time_height * score.get_time_delta_f64(cover_from, cover_to);
+        self.draw_rect(
+            canvas,
+            cfg.lane_padding as f64,
+            y,
+            cfg.lane_width as f64 * cfg.n_lanes as f64,
+            height,
+            css_class,
+            RGBA::rgb(0x78, 0x90, 0x9c),
+        );
+    }
+
+    fn draw_segment_grid(
+        &self,
+        canvas: &skia_safe::Canvas,
+        score: &mut Score,
+        segment: &Segment,
+        bar_stop: Fraction,
+    ) {
+        self.draw_segment_lane_lines(canvas, segment.height);
+        for bar in segment.start..=segment.stop {
+            let bar = Fraction::from_integer(bar as i64);
+            self.draw_segment_bar_line(canvas, score, bar, bar_stop);
+            self.draw_segment_beat_lines(canvas, score, bar, bar_stop);
+        }
+    }
+
+    fn draw_segment_lane_lines(&self, canvas: &skia_safe::Canvas, height: f64) {
+        let cfg = &self.drawing.config;
         for lane in (0..=cfg.n_lanes).step_by(2) {
             let x = cfg.lane_width as f64 * lane as f64 + cfg.lane_padding as f64;
             self.draw_line(
@@ -929,67 +993,85 @@ impl<'a> DirectRenderer<'a> {
                 x,
                 0.0,
                 x,
-                segment.height,
+                height,
                 "lane-line",
                 RGBA::rgb(0xe2, 0xe2, 0xe2),
                 1.0,
             );
         }
+    }
 
-        for bar in segment.start..=segment.stop {
-            let bar_f = Fraction::from_integer(bar as i64);
-            let y = cfg.time_height * score.get_time_delta_f64(bar_f, bar_stop_f)
+    fn draw_segment_bar_line(
+        &self,
+        canvas: &skia_safe::Canvas,
+        score: &mut Score,
+        bar: Fraction,
+        bar_stop: Fraction,
+    ) {
+        let cfg = &self.drawing.config;
+        let y = cfg.time_height * score.get_time_delta_f64(bar, bar_stop) + cfg.time_padding as f64;
+        let x1 = cfg.lane_padding as f64;
+        let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + x1;
+        self.draw_line(
+            canvas,
+            x1,
+            y,
+            x2,
+            y,
+            "bar-line",
+            RGBA::rgb(0xe2, 0xe2, 0xe2),
+            4.0,
+        );
+    }
+
+    fn draw_segment_beat_lines(
+        &self,
+        canvas: &skia_safe::Canvas,
+        score: &mut Score,
+        bar: Fraction,
+        bar_stop: Fraction,
+    ) {
+        let cfg = &self.drawing.config;
+        let bar_length = score
+            .get_event(bar)
+            .bar_length
+            .unwrap_or(Fraction::from_integer(4));
+        let x1 = cfg.lane_padding as f64;
+        let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + x1;
+        for beat_idx in 1..bar_length.to_f64().ceil() as i32 {
+            let beat_bar = bar + Fraction::new(beat_idx as i64, 1) / bar_length;
+            let y = cfg.time_height * score.get_time_delta_f64(beat_bar, bar_stop)
                 + cfg.time_padding as f64;
-            let x1 = cfg.lane_padding as f64;
-            let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64;
             self.draw_line(
                 canvas,
                 x1,
                 y,
                 x2,
                 y,
-                "bar-line",
+                "beat-line",
                 RGBA::rgb(0xe2, 0xe2, 0xe2),
-                4.0,
+                1.0,
             );
-
-            let event = score.get_event(bar_f);
-            let bar_length = event
-                .bar_length
-                .unwrap_or(Fraction::from_integer(4))
-                .to_f64()
-                .ceil() as i32;
-            let bar_length_frac = event.bar_length.unwrap_or(Fraction::from_integer(4));
-            for beat_i in 1..bar_length {
-                let beat_bar = bar_f + Fraction::new(beat_i as i64, 1) / bar_length_frac;
-                let beat_y = cfg.time_height * score.get_time_delta_f64(beat_bar, bar_stop_f)
-                    + cfg.time_padding as f64;
-                self.draw_line(
-                    canvas,
-                    x1,
-                    beat_y,
-                    x2,
-                    beat_y,
-                    "beat-line",
-                    RGBA::rgb(0xe2, 0xe2, 0xe2),
-                    1.0,
-                );
-            }
         }
+    }
 
-        let speed_lines = self.draw_event_labels(canvas, score, segment.start, segment.stop);
-        if let Some(lyric) = lyric {
-            self.draw_lyrics(canvas, score, lyric, bar_start_f, bar_stop_f);
-        }
-
-        let layers =
-            self.collect_note_layers(render_index, notes_snapshot, bar_start_f, bar_stop_f);
+    #[allow(clippy::too_many_arguments)]
+    fn draw_segment_notes(
+        &self,
+        canvas: &skia_safe::Canvas,
+        score: &mut Score,
+        arena: &[NoteData],
+        render_index: &RenderIndex,
+        bar_start: Fraction,
+        bar_stop: Fraction,
+    ) {
+        let layers = self.collect_note_layers(render_index, arena, bar_start, bar_stop);
         let mut amongs = Vec::new();
-        for &idx in &layers.slide_paths {
-            self.draw_slide_path(canvas, score, notes_snapshot, idx, bar_stop_f, &mut amongs);
+        for &note_idx in &layers.slide_paths {
+            self.draw_slide_path(canvas, score, arena, note_idx, bar_stop, &mut amongs);
         }
-        for &idx in &layers.notes {
-            self.draw_note(canvas, score, notes_snapshot, idx, bar_stop_f);
+        for &note_idx in &layers.notes {
+            self.draw_note(canvas, score, arena, note_idx, bar_stop);
         }
         for among in amongs {
             self.draw_among(
@@ -1001,15 +1083,19 @@ impl<'a> DirectRenderer<'a> {
                 among.height,
             );
         }
-        for &idx in layers.flicks.iter().rev() {
-            self.draw_flick(canvas, score, notes_snapshot, idx, bar_stop_f);
+        for &note_idx in layers.flicks.iter().rev() {
+            self.draw_flick(canvas, score, arena, note_idx, bar_stop);
         }
         for tick in layers.ticks {
-            self.draw_tick(canvas, score, notes_snapshot, tick, bar_stop_f);
+            self.draw_tick(canvas, score, arena, tick, bar_stop);
         }
+    }
+
+    fn draw_speed_lines(&self, canvas: &skia_safe::Canvas, speed_lines: Vec<SpeedLine>) {
+        let cfg = &self.drawing.config;
+        let x1 = cfg.lane_padding as f64;
+        let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + x1;
         for speed in speed_lines {
-            let x1 = cfg.lane_padding as f64;
-            let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64;
             self.draw_line(
                 canvas,
                 x1,
@@ -1030,8 +1116,6 @@ impl<'a> DirectRenderer<'a> {
                 TextAnchor::End,
             );
         }
-
-        let _ = chart_height;
     }
 
     fn draw_event_labels(
@@ -1042,27 +1126,10 @@ impl<'a> DirectRenderer<'a> {
         bar_stop: i32,
     ) -> Vec<SpeedLine> {
         let cfg = &self.drawing.config;
-        let bar_start_f = Fraction::from_integer(bar_start as i64);
         let bar_stop_f = Fraction::from_integer(bar_stop as i64);
-        let visible_from = bar_start_f - Fraction::from_integer(1);
-        let visible_to = bar_stop_f + Fraction::from_integer(1);
         let mut speed_lines = Vec::new();
         let mut print_events: Vec<Event> = Vec::new();
-        let mut all_events: Vec<Event> = (bar_start..=bar_stop)
-            .map(|i| Event::new(Fraction::from_integer(i as i64)))
-            .collect();
-        all_events.extend(
-            score
-                .events
-                .iter()
-                .filter(|event| visible_from <= event.bar && event.bar < visible_to)
-                .cloned(),
-        );
-        all_events.sort_by(|a, b| {
-            a.bar
-                .partial_cmp(&b.bar)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        let all_events = skia_sentence_events(score, bar_start, bar_stop);
 
         for event in &all_events {
             if let Some(speed) = event.speed {
@@ -1071,99 +1138,85 @@ impl<'a> DirectRenderer<'a> {
                 speed_lines.push(SpeedLine { y, speed });
                 continue;
             }
+            merge_skia_print_event(&mut print_events, event);
+            self.draw_skia_event_flag(canvas, score, event, bar_stop_f);
+        }
 
-            if let Some(last) = print_events.last_mut() {
-                if (event.bar - last.bar).to_f64() <= 1.0 / 16.0 {
-                    last.merge_from(event);
-                } else {
-                    print_events.push(event.clone());
-                }
+        for event in &print_events {
+            self.draw_skia_event_text(canvas, score, event, bar_stop_f);
+        }
+
+        speed_lines
+    }
+
+    fn draw_skia_event_flag(
+        &self,
+        canvas: &skia_safe::Canvas,
+        score: &mut Score,
+        event: &Event,
+        bar_stop: Fraction,
+    ) {
+        let special = skia_event_special(event);
+        let y = self.drawing.config.time_height * score.get_time_delta_f64(event.bar, bar_stop)
+            + self.drawing.config.time_padding as f64;
+        self.draw_line(
+            canvas,
+            0.0,
+            y,
+            self.drawing.config.lane_padding as f64,
+            y,
+            if special {
+                "event-flag"
             } else {
-                print_events.push(event.clone());
-            }
+                "bar-count-flag"
+            },
+            if special {
+                RGBA::rgb(0xfe, 0xe3, 0x00)
+            } else {
+                RGBA::WHITE
+            },
+            4.0,
+        );
+    }
 
-            let special = event.bpm.is_some()
-                || event.bar_length.is_some()
-                || event.speed.is_some()
-                || event.section.is_some()
-                || event.text.is_some();
-            let y = cfg.time_height * score.get_time_delta_f64(event.bar, bar_stop_f)
-                + cfg.time_padding as f64;
-            self.draw_line(
-                canvas,
-                0.0,
-                y,
-                cfg.lane_padding as f64,
-                y,
-                if special {
-                    "event-flag"
-                } else {
-                    "bar-count-flag"
-                },
+    fn draw_skia_event_text(
+        &self,
+        canvas: &skia_safe::Canvas,
+        score: &mut Score,
+        event: &Event,
+        bar_stop: Fraction,
+    ) {
+        let text = skia_event_label(event);
+        if text.is_empty() {
+            return;
+        }
+        let special = skia_event_special(event);
+        let cfg = &self.drawing.config;
+        let y = cfg.time_height * score.get_time_delta_f64(event.bar, bar_stop)
+            + cfg.time_padding as f64;
+        self.draw_rotated_text(
+            canvas,
+            &text,
+            cfg.lane_padding as f64 + 8.0,
+            y - cfg.lane_width as f64 * 1.5,
+            cfg.lane_padding as f64,
+            y,
+            if special {
+                "event-text"
+            } else {
+                "bar-count-text"
+            },
+            TextDefaults::new(
                 if special {
                     RGBA::rgb(0xfe, 0xe3, 0x00)
                 } else {
                     RGBA::WHITE
                 },
-                4.0,
-            );
-        }
-
-        for event in &print_events {
-            let mut parts = Vec::new();
-            if event.bar.trunc() == *event.bar.numer() && *event.bar.denom() == 1 {
-                parts.push(format!("#{}", format_g(event.bar.to_f64())));
-            }
-            if let Some(bpm) = event.bpm {
-                parts.push(format!("{} BPM", format_g(bpm.to_f64())));
-            }
-            if let Some(bl) = event.bar_length {
-                parts.push(format!("{}/4", format_g(bl.to_f64())));
-            }
-            if let Some(ref section) = event.section {
-                parts.push(section.clone());
-            }
-            if let Some(ref text) = event.text {
-                parts.push(text.clone());
-            }
-
-            let text = parts.join(", ");
-            if text.is_empty() {
-                continue;
-            }
-            let special = event.bpm.is_some()
-                || event.bar_length.is_some()
-                || event.speed.is_some()
-                || event.section.is_some()
-                || event.text.is_some();
-            let y = cfg.time_height * score.get_time_delta_f64(event.bar, bar_stop_f)
-                + cfg.time_padding as f64;
-            self.draw_rotated_text(
-                canvas,
-                &text,
-                cfg.lane_padding as f64 + 8.0,
-                y - cfg.lane_width as f64 * 1.5,
-                cfg.lane_padding as f64,
-                y,
-                if special {
-                    "event-text"
-                } else {
-                    "bar-count-text"
-                },
-                TextDefaults::new(
-                    if special {
-                        RGBA::rgb(0xfe, 0xe3, 0x00)
-                    } else {
-                        RGBA::WHITE
-                    },
-                    12.0,
-                    900,
-                ),
-                TextAnchor::Start,
-            );
-        }
-
-        speed_lines
+                12.0,
+                900,
+            ),
+            TextAnchor::Start,
+        );
     }
 
     fn draw_lyrics(
@@ -1250,51 +1303,14 @@ impl<'a> DirectRenderer<'a> {
         note_idx: NoteIdx,
         note: &NoteData,
     ) {
-        if let Some(tick_val) = note.is_tick(notes_snapshot) {
-            if tick_val {
-                let next_idx = render_index.next_ticks[note_idx];
-                layers.ticks.push(TickCommand::Text { note_idx, next_idx });
-            } else {
-                layers.ticks.push(TickCommand::Short { bar: note.bar() });
-            }
-        }
-
+        collect_tick_command(layers, render_index, notes_snapshot, note_idx, note);
         match note {
             NoteData::Tap(..) => layers.notes.push(note_idx),
             NoteData::Directional(..) => {
                 layers.flicks.push(note_idx);
                 layers.notes.push(note_idx);
             }
-            NoteData::Slide(_, slide) => {
-                if !slide.decoration {
-                    match SlideType::from_i32(note.note_type()) {
-                        Some(SlideType::Start) => {
-                            layers.slide_paths.push(note_idx);
-                            layers.notes.push(note_idx);
-                        }
-                        Some(SlideType::End) => {
-                            if slide.directional_idx != NO_NOTE {
-                                layers.flicks.push(note_idx);
-                            }
-                            layers.notes.push(note_idx);
-                        }
-                        _ => {}
-                    }
-                } else {
-                    if matches!(
-                        SlideType::from_i32(note.note_type()),
-                        Some(SlideType::Start)
-                    ) {
-                        layers.slide_paths.push(note_idx);
-                    }
-                    if slide.tap_idx != NO_NOTE {
-                        layers.notes.push(slide.tap_idx);
-                        if slide.directional_idx != NO_NOTE {
-                            layers.flicks.push(note_idx);
-                        }
-                    }
-                }
-            }
+            NoteData::Slide(_, slide) => collect_slide_commands(layers, note_idx, note, slide),
         }
     }
 
@@ -1307,79 +1323,8 @@ impl<'a> DirectRenderer<'a> {
         bar_stop: Fraction,
         amongs: &mut Vec<AmongCommand>,
     ) {
-        let cfg = &self.drawing.config;
-        let mut lefts: Vec<BezierPoints> = Vec::new();
-        let mut rights: Vec<BezierPoints> = Vec::new();
-        let mut cur_idx = start_idx;
-
-        loop {
-            let cur_type = arena[cur_idx].note_type();
-            if matches!(SlideType::from_i32(cur_type), Some(SlideType::End)) {
-                break;
-            }
-
-            let Some(slide) = arena[cur_idx].as_slide() else {
-                break;
-            };
-            if slide.next_idx == NO_NOTE {
-                break;
-            }
-
-            let mut relay_amongs = Vec::new();
-            let mut next_idx = slide.next_idx;
-            loop {
-                let next_type = arena[next_idx].note_type();
-                if matches!(SlideType::from_i32(next_type), Some(SlideType::Relay)) {
-                    relay_amongs.push(next_idx);
-                }
-
-                let Some(next_slide) = arena[next_idx].as_slide() else {
-                    break;
-                };
-                if next_slide.is_path(next_type) {
-                    break;
-                }
-                if next_slide.next_idx == NO_NOTE {
-                    break;
-                }
-                next_idx = next_slide.next_idx;
-            }
-
-            let (left, right) = bezier_coordinates(
-                &self.drawing.config,
-                score,
-                arena,
-                cur_idx,
-                next_idx,
-                bar_stop,
-            );
-            for &among_idx in &relay_amongs {
-                let among_bar = arena[among_idx].bar();
-                let y = cfg.time_height * score.get_time_delta_f64(among_bar, bar_stop)
-                    + cfg.time_padding as f64;
-                let x_l = binary_solution_for_x(y, &left);
-                let x_r = binary_solution_for_x(y, &right);
-                let x = (x_l + x_r) / 2.0;
-                let w = cfg.lane_width as f64;
-                let h = cfg.lane_width as f64;
-                amongs.push(AmongCommand {
-                    kind: if arena[among_idx].is_critical(arena) {
-                        AmongKind::LongAmongCritical
-                    } else {
-                        AmongKind::LongAmong
-                    },
-                    x: x - w / 2.0,
-                    y: y - h / 2.0,
-                    width: w,
-                    height: h,
-                });
-            }
-
-            lefts.push(left);
-            rights.push(right);
-            cur_idx = next_idx;
-        }
-
+        let (lefts, rights) =
+            self.collect_skia_slide_edges(score, arena, start_idx, bar_stop, amongs);
         if lefts.is_empty() {
             return;
         }
@@ -1387,27 +1332,8 @@ impl<'a> DirectRenderer<'a> {
         let is_critical = arena[start_idx].is_critical(arena);
         let is_decoration = arena[start_idx]
             .as_slide()
-            .map(|s| s.decoration)
-            .unwrap_or(false);
-        let (class_name, fallback, gradient_id) = if is_decoration {
-            if is_critical {
-                (
-                    "decoration-critical",
-                    RGBA::rgba(0xfc, 0xf1, 0xc3, 0x99),
-                    Some("decoration-critical-gradient"),
-                )
-            } else {
-                (
-                    "decoration",
-                    RGBA::rgba(0xc9, 0xfc, 0xe2, 0x99),
-                    Some("decoration-gradient"),
-                )
-            }
-        } else if is_critical {
-            ("slide-critical", RGBA::rgba(0xfc, 0xf1, 0xc3, 0xcc), None)
-        } else {
-            ("slide", RGBA::rgba(0xc9, 0xfc, 0xe2, 0xcc), None)
-        };
+            .is_some_and(|slide| slide.decoration);
+        let (class_name, fallback, gradient_id) = slide_paint_style(is_decoration, is_critical);
 
         let mut path = PathBuilder::new();
         for (i, left) in lefts.iter().enumerate() {
@@ -1436,6 +1362,86 @@ impl<'a> DirectRenderer<'a> {
         canvas.draw_path(&path, &paint);
     }
 
+    fn collect_skia_slide_edges(
+        &self,
+        score: &mut Score,
+        arena: &[NoteData],
+        start_idx: NoteIdx,
+        bar_stop: Fraction,
+        amongs: &mut Vec<AmongCommand>,
+    ) -> (Vec<BezierPoints>, Vec<BezierPoints>) {
+        let mut lefts = Vec::new();
+        let mut rights = Vec::new();
+        let mut current_idx = start_idx;
+        loop {
+            if matches!(
+                SlideType::from_i32(arena[current_idx].note_type()),
+                Some(SlideType::End)
+            ) {
+                break;
+            }
+            let Some(slide) = arena[current_idx].as_slide() else {
+                break;
+            };
+            if slide.next_idx == NO_NOTE {
+                break;
+            }
+            let (next_idx, relay_amongs) = skia_next_slide_path_node(arena, slide.next_idx);
+            let (left, right) = bezier_coordinates(
+                &self.drawing.config,
+                score,
+                arena,
+                current_idx,
+                next_idx,
+                bar_stop,
+            );
+            self.push_skia_slide_amongs(
+                score,
+                arena,
+                &relay_amongs,
+                bar_stop,
+                &left,
+                &right,
+                amongs,
+            );
+            lefts.push(left);
+            rights.push(right);
+            current_idx = next_idx;
+        }
+        (lefts, rights)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_skia_slide_amongs(
+        &self,
+        score: &mut Score,
+        arena: &[NoteData],
+        relay_amongs: &[NoteIdx],
+        bar_stop: Fraction,
+        left: &BezierPoints,
+        right: &BezierPoints,
+        amongs: &mut Vec<AmongCommand>,
+    ) {
+        let size = self.drawing.config.lane_width as f64;
+        for &among_idx in relay_amongs {
+            let y = self.drawing.config.time_height
+                * score.get_time_delta_f64(arena[among_idx].bar(), bar_stop)
+                + self.drawing.config.time_padding as f64;
+            let x = (binary_solution_for_x(y, left) + binary_solution_for_x(y, right)) / 2.0;
+            amongs.push(AmongCommand {
+                kind: if arena[among_idx].is_critical(arena) {
+                    AmongKind::LongAmongCritical
+                } else {
+                    AmongKind::LongAmong
+                },
+                x: x - size / 2.0,
+                y: y - size / 2.0,
+                width: size,
+                height: size,
+            });
+        }
+    }
+
     fn draw_note(
         &self,
         canvas: &skia_safe::Canvas,
@@ -1456,36 +1462,10 @@ impl<'a> DirectRenderer<'a> {
         let w = cfg.lane_width as f64 * (note.width() + 1) as f64;
         let h = cfg.lane_width as f64 / 64.0 * 56.0 * 2.0;
 
-        let note_number = if note.is_trend(arena) {
+        if note.is_trend(arena) {
             self.draw_friction_among(canvas, score, arena, note_idx, bar_stop);
-            if note.is_critical(arena) {
-                5
-            } else if note.is_directional() {
-                6
-            } else {
-                4
-            }
-        } else if note.is_critical(arena) {
-            0
-        } else if note.is_directional() {
-            3
-        } else if note.is_slide() {
-            if matches!(SlideType::from_i32(note.note_type()), Some(SlideType::End)) {
-                if let Some(slide) = note.as_slide() {
-                    if slide.directional_idx != NO_NOTE {
-                        3
-                    } else {
-                        1
-                    }
-                } else {
-                    1
-                }
-            } else {
-                1
-            }
-        } else {
-            2
-        };
+        }
+        let note_number = skia_note_number(note, arena);
 
         if self.draw_note_image_asset(canvas, note_number, note.width() + 1, x, y - h / 2.0, w, h) {
             return;
@@ -2518,60 +2498,268 @@ impl TextDefaults {
     }
 }
 
+fn collect_tick_command(
+    layers: &mut SegmentLayers,
+    render_index: &RenderIndex,
+    arena: &[NoteData],
+    note_idx: NoteIdx,
+    note: &NoteData,
+) {
+    match note.is_tick(arena) {
+        Some(true) => layers.ticks.push(TickCommand::Text {
+            note_idx,
+            next_idx: render_index.next_ticks[note_idx],
+        }),
+        Some(false) => layers.ticks.push(TickCommand::Short { bar: note.bar() }),
+        None => {}
+    }
+}
+
+fn skia_sentence_events(score: &Score, bar_start: i32, bar_stop: i32) -> Vec<Event> {
+    let visible_from = Fraction::from_integer(bar_start as i64 - 1);
+    let visible_to = Fraction::from_integer(bar_stop as i64 + 1);
+    let mut events = (bar_start..=bar_stop)
+        .map(|bar| Event::new(Fraction::from_integer(bar as i64)))
+        .collect::<Vec<_>>();
+    events.extend(
+        score
+            .events
+            .iter()
+            .filter(|event| visible_from <= event.bar && event.bar < visible_to)
+            .cloned(),
+    );
+    events.sort_by(|left, right| {
+        left.bar
+            .partial_cmp(&right.bar)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    events
+}
+
+fn merge_skia_print_event(events: &mut Vec<Event>, event: &Event) {
+    let Some(last) = events.last_mut() else {
+        events.push(event.clone());
+        return;
+    };
+    if (event.bar - last.bar).to_f64() <= 1.0 / 16.0 {
+        last.merge_from(event);
+    } else {
+        events.push(event.clone());
+    }
+}
+
+fn skia_event_special(event: &Event) -> bool {
+    event.bpm.is_some()
+        || event.bar_length.is_some()
+        || event.speed.is_some()
+        || event.section.is_some()
+        || event.text.is_some()
+}
+
+fn skia_event_label(event: &Event) -> String {
+    let mut parts = Vec::new();
+    if event.bar.trunc() == *event.bar.numer() && *event.bar.denom() == 1 {
+        parts.push(format!("#{}", format_g(event.bar.to_f64())));
+    }
+    if let Some(bpm) = event.bpm {
+        parts.push(format!("{} BPM", format_g(bpm.to_f64())));
+    }
+    if let Some(bar_length) = event.bar_length {
+        parts.push(format!("{}/4", format_g(bar_length.to_f64())));
+    }
+    if let Some(section) = &event.section {
+        parts.push(section.clone());
+    }
+    if let Some(text) = &event.text {
+        parts.push(text.clone());
+    }
+    parts.join(", ")
+}
+
+fn collect_slide_commands(
+    layers: &mut SegmentLayers,
+    note_idx: NoteIdx,
+    note: &NoteData,
+    slide: &crate::notes::slide::Slide,
+) {
+    if slide.decoration {
+        collect_decoration_slide_commands(layers, note_idx, note, slide);
+        return;
+    }
+    match SlideType::from_i32(note.note_type()) {
+        Some(SlideType::Start) => {
+            layers.slide_paths.push(note_idx);
+            layers.notes.push(note_idx);
+        }
+        Some(SlideType::End) => {
+            if slide.directional_idx != NO_NOTE {
+                layers.flicks.push(note_idx);
+            }
+            layers.notes.push(note_idx);
+        }
+        _ => {}
+    }
+}
+
+fn collect_decoration_slide_commands(
+    layers: &mut SegmentLayers,
+    note_idx: NoteIdx,
+    note: &NoteData,
+    slide: &crate::notes::slide::Slide,
+) {
+    if matches!(
+        SlideType::from_i32(note.note_type()),
+        Some(SlideType::Start)
+    ) {
+        layers.slide_paths.push(note_idx);
+    }
+    if slide.tap_idx == NO_NOTE {
+        return;
+    }
+    layers.notes.push(slide.tap_idx);
+    if slide.directional_idx != NO_NOTE {
+        layers.flicks.push(note_idx);
+    }
+}
+
+fn skia_note_number(note: &NoteData, arena: &[NoteData]) -> i32 {
+    if note.is_trend(arena) {
+        return if note.is_critical(arena) {
+            5
+        } else if note.is_directional() {
+            6
+        } else {
+            4
+        };
+    }
+    if note.is_critical(arena) {
+        return 0;
+    }
+    if note.is_directional() {
+        return 3;
+    }
+    if !note.is_slide() {
+        return 2;
+    }
+    let directional_end = matches!(SlideType::from_i32(note.note_type()), Some(SlideType::End))
+        && note
+            .as_slide()
+            .is_some_and(|slide| slide.directional_idx != NO_NOTE);
+    if directional_end { 3 } else { 1 }
+}
+
+fn skia_bar_visible(bar: Fraction, bar_start: Fraction, bar_stop: Fraction) -> bool {
+    bar_start - Fraction::from_integer(1) <= bar && bar < bar_stop + Fraction::from_integer(1)
+}
+
+fn skia_slide_visible(
+    head_idx: NoteIdx,
+    arena: &[NoteData],
+    bar_start: Fraction,
+    bar_stop: Fraction,
+) -> bool {
+    if head_idx == NO_NOTE {
+        return false;
+    }
+    let mut current_idx = next_skia_visible_slide_path_node(head_idx, arena);
+    let mut found_before = false;
+    while let Some(note_idx) = current_idx {
+        let bar = arena[note_idx].bar();
+        if skia_bar_visible(bar, bar_start, bar_stop) {
+            return true;
+        }
+        if bar < bar_start - Fraction::from_integer(1) {
+            found_before = true;
+        } else if found_before && bar_stop + Fraction::from_integer(1) < bar {
+            return true;
+        }
+        current_idx = following_skia_visible_slide_path_node(note_idx, arena);
+    }
+    false
+}
+
+fn next_skia_visible_slide_path_node(start_idx: NoteIdx, arena: &[NoteData]) -> Option<NoteIdx> {
+    let mut note_idx = start_idx;
+    loop {
+        let note = &arena[note_idx];
+        let slide = note.as_slide()?;
+        if slide.is_path(note.note_type()) {
+            return Some(note_idx);
+        }
+        if slide.next_idx == NO_NOTE {
+            return None;
+        }
+        note_idx = slide.next_idx;
+    }
+}
+
+fn following_skia_visible_slide_path_node(
+    note_idx: NoteIdx,
+    arena: &[NoteData],
+) -> Option<NoteIdx> {
+    let next_idx = arena[note_idx].as_slide()?.next_idx;
+    (next_idx != NO_NOTE)
+        .then(|| next_skia_visible_slide_path_node(next_idx, arena))
+        .flatten()
+}
+
+fn skia_slide_curve_direction(note: &NoteData, arena: &[NoteData]) -> Option<DirectionalType> {
+    let directional_idx = note.as_slide()?.directional_idx;
+    (directional_idx != NO_NOTE)
+        .then(|| DirectionalType::from_i32(arena[directional_idx].note_type()))
+        .flatten()
+}
+
+fn skia_next_slide_path_node(arena: &[NoteData], start_idx: NoteIdx) -> (NoteIdx, Vec<NoteIdx>) {
+    let mut relay_amongs = Vec::new();
+    let mut next_idx = start_idx;
+    loop {
+        let note_type = arena[next_idx].note_type();
+        if matches!(SlideType::from_i32(note_type), Some(SlideType::Relay)) {
+            relay_amongs.push(next_idx);
+        }
+        let Some(slide) = arena[next_idx].as_slide() else {
+            break;
+        };
+        if slide.is_path(note_type) || slide.next_idx == NO_NOTE {
+            break;
+        }
+        next_idx = slide.next_idx;
+    }
+    (next_idx, relay_amongs)
+}
+
+fn slide_paint_style(
+    decoration: bool,
+    critical: bool,
+) -> (&'static str, RGBA, Option<&'static str>) {
+    match (decoration, critical) {
+        (true, true) => (
+            "decoration-critical",
+            RGBA::rgba(0xfc, 0xf1, 0xc3, 0x99),
+            Some("decoration-critical-gradient"),
+        ),
+        (true, false) => (
+            "decoration",
+            RGBA::rgba(0xc9, 0xfc, 0xe2, 0x99),
+            Some("decoration-gradient"),
+        ),
+        (false, true) => ("slide-critical", RGBA::rgba(0xfc, 0xf1, 0xc3, 0xcc), None),
+        (false, false) => ("slide", RGBA::rgba(0xc9, 0xfc, 0xe2, 0xcc), None),
+    }
+}
+
 fn note_visible(
     note: &NoteData,
     arena: &[NoteData],
     bar_start_f: Fraction,
     bar_stop_f: Fraction,
 ) -> bool {
-    if note.is_slide() {
-        let Some(slide) = note.as_slide() else {
-            return false;
-        };
-        let head_idx = slide.head_idx;
-        if head_idx == NO_NOTE {
-            return false;
-        }
-        let mut cur_idx = head_idx;
-        let mut before = false;
-        loop {
-            let cur = &arena[cur_idx];
-            if let Some(s) = cur.as_slide()
-                && !s.is_path(cur.note_type())
-            {
-                if s.next_idx == NO_NOTE {
-                    break;
-                }
-                cur_idx = s.next_idx;
-                continue;
-            }
-
-            let bar = arena[cur_idx].bar();
-            if bar_start_f - Fraction::from_integer(1) <= bar
-                && bar < bar_stop_f + Fraction::from_integer(1)
-            {
-                return true;
-            } else if bar < bar_start_f - Fraction::from_integer(1) {
-                before = true;
-            } else if before && bar_stop_f + Fraction::from_integer(1) < bar {
-                return true;
-            }
-
-            if let Some(s) = arena[cur_idx].as_slide() {
-                if s.next_idx == NO_NOTE {
-                    break;
-                }
-                cur_idx = s.next_idx;
-            } else {
-                break;
-            }
-        }
-        false
-    } else {
-        let bar = note.bar();
-        bar_start_f - Fraction::from_integer(1) <= bar
-            && bar < bar_stop_f + Fraction::from_integer(1)
+    if !note.is_slide() {
+        return skia_bar_visible(note.bar(), bar_start_f, bar_stop_f);
     }
+    note.as_slide()
+        .is_some_and(|slide| skia_slide_visible(slide.head_idx, arena, bar_start_f, bar_stop_f))
 }
 
 fn bezier_coordinates(
@@ -2589,29 +2777,12 @@ fn bezier_coordinates(
     let y_1 = cfg.time_height * score.get_time_delta_f64(slide_1.bar(), bar_stop)
         + cfg.time_padding as f64;
 
-    let ease_in = slide_0
-        .as_slide()
-        .and_then(|s| {
-            if s.directional_idx != NO_NOTE {
-                DirectionalType::from_i32(arena[s.directional_idx].note_type())
-                    .filter(|dt| matches!(dt, DirectionalType::Down))
-            } else {
-                None
-            }
-        })
-        .is_some();
-    let ease_out = slide_0
-        .as_slide()
-        .and_then(|s| {
-            if s.directional_idx != NO_NOTE {
-                DirectionalType::from_i32(arena[s.directional_idx].note_type()).filter(|dt| {
-                    matches!(dt, DirectionalType::LowerLeft | DirectionalType::LowerRight)
-                })
-            } else {
-                None
-            }
-        })
-        .is_some();
+    let curve_direction = skia_slide_curve_direction(slide_0, arena);
+    let ease_in = matches!(curve_direction, Some(DirectionalType::Down));
+    let ease_out = matches!(
+        curve_direction,
+        Some(DirectionalType::LowerLeft | DirectionalType::LowerRight)
+    );
 
     let is_decoration = slide_0.as_slide().map(|s| s.decoration).unwrap_or(false);
     let spp = if is_decoration {
@@ -3210,42 +3381,59 @@ struct CssStyles {
     gradient_stops: HashMap<String, GradientStops>,
 }
 
+fn next_css_block(css: &str, cursor: usize) -> Option<(&str, &str, usize)> {
+    let open = cursor + css[cursor..].find('{')?;
+    let close = open + 1 + css[open + 1..].find('}')?;
+    Some((css[cursor..open].trim(), &css[open + 1..close], close + 1))
+}
+
+fn apply_css_selectors(
+    selectors: &str,
+    parsed: &CssRuleStyle,
+    parsed_gradient: Option<GradientStops>,
+    rules: &mut HashMap<String, CssRuleStyle>,
+    gradient_stops: &mut HashMap<String, GradientStops>,
+) {
+    for selector in selectors.split(',').map(str::trim) {
+        if let Some(class_name) = css_selector_name(selector, '.') {
+            rules
+                .entry(class_name.to_string())
+                .or_default()
+                .merge(parsed);
+        } else if let (Some(id), Some(stops)) = (css_selector_name(selector, '#'), parsed_gradient)
+        {
+            gradient_stops.insert(id.to_string(), stops);
+        }
+    }
+}
+
+fn css_selector_name(selector: &str, prefix: char) -> Option<&str> {
+    let name = selector
+        .strip_prefix(prefix)?
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim();
+    (!name.is_empty()).then_some(name)
+}
+
 impl CssStyles {
     fn parse(css: &str) -> Self {
         let css = strip_css_comments(css);
         let mut rules = HashMap::<String, CssRuleStyle>::new();
         let mut gradient_stops = HashMap::<String, GradientStops>::new();
         let mut cursor = 0usize;
-        while let Some(open_rel) = css[cursor..].find('{') {
-            let open = cursor + open_rel;
-            let Some(close_rel) = css[open + 1..].find('}') else {
-                break;
-            };
-            let close = open + 1 + close_rel;
-            let selectors = css[cursor..open].trim();
-            let body = &css[open + 1..close];
+        while let Some((selectors, body, next_cursor)) = next_css_block(&css, cursor) {
             let parsed = parse_css_body(body);
             let parsed_gradient = parse_gradient_stops(body);
-            for selector in selectors.split(',') {
-                let selector = selector.trim();
-                if let Some(class_name) = selector.strip_prefix('.') {
-                    let class_name = class_name.split_whitespace().next().unwrap_or("").trim();
-                    if class_name.is_empty() {
-                        continue;
-                    }
-                    let entry = rules.entry(class_name.to_string()).or_default();
-                    entry.merge(&parsed);
-                } else if let Some(id) = selector.strip_prefix('#') {
-                    let id = id.split_whitespace().next().unwrap_or("").trim();
-                    if id.is_empty() {
-                        continue;
-                    }
-                    if let Some(stops) = parsed_gradient {
-                        gradient_stops.insert(id.to_string(), stops);
-                    }
-                }
-            }
-            cursor = close + 1;
+            apply_css_selectors(
+                selectors,
+                &parsed,
+                parsed_gradient,
+                &mut rules,
+                &mut gradient_stops,
+            );
+            cursor = next_cursor;
         }
         Self {
             rules,

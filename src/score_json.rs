@@ -304,135 +304,20 @@ fn parse_notes(
     note_data: &[Value],
     tick_converter: &TickConverter,
 ) -> (Vec<NoteData>, Vec<NoteIdx>) {
-    let mut raw_notes: Vec<RawNote> = note_data.iter().map(read_note).collect();
-    raw_notes.sort_by(|left, right| {
-        left.ticks
-            .cmp(&right.ticks)
-            .then(left.lane_start.cmp(&right.lane_start))
-            .then(left.id.cmp(&right.id))
-    });
-
+    let raw_notes = sorted_raw_notes(note_data);
     let (chains, connected_ids) = build_chains(&raw_notes);
-    let mut connected_slide_slots = HashSet::new();
-    let mut critical_slide_slots = HashSet::new();
-    let mut hidden_head_slide_slots = HashSet::new();
-    let mut standalone_tap_slots = HashSet::new();
-    let mut occupied_tap_slots = HashSet::new();
-
-    for chain in &chains {
-        for &note_index in chain {
-            connected_slide_slots.insert(note_slot_key(&raw_notes[note_index]));
-        }
-    }
-
-    for raw_chain in &chains {
-        let chain = remove_adjacent_visible_relay_duplicates(&raw_notes, raw_chain);
-        let visible_relay_as_attachment = chain_has_curve_line(&raw_notes, &chain);
-        for (index, &note_index) in chain.iter().enumerate() {
-            let note = &raw_notes[note_index];
-            let slide_type = get_slide_type(note, index + 1 == chain.len());
-            if !is_visible_relay_attachment(note)
-                && connected_note_adds_tap(note, slide_type, visible_relay_as_attachment)
-            {
-                reserve_tap_slot(&mut occupied_tap_slots, note);
-            }
-        }
-    }
-
-    for note in &raw_notes {
-        if !connected_ids.contains(&note.id) {
-            reserve_tap_slot(&mut occupied_tap_slots, note);
-            standalone_tap_slots.insert(note_slot_key(note));
-        }
-    }
-
-    for chain in &chains {
-        if is_hidden_head_slide_chain(&raw_notes, chain, &standalone_tap_slots) {
-            hidden_head_slide_slots.insert(note_slot_key(&raw_notes[chain[0]]));
-        }
-    }
-
+    let mut slots = JsonNoteSlots::new(&raw_notes, &chains, &connected_ids);
     let mut builder = JsonNoteBuilder::new(tick_converter);
     let mut channel_available_at = [f64::NEG_INFINITY; 36];
 
     for raw_chain in &chains {
-        let chain = remove_adjacent_visible_relay_duplicates(&raw_notes, raw_chain);
-        if chain.is_empty() {
-            continue;
-        }
-
-        let start_tick = raw_notes[chain[0]].ticks as f64;
-        let end_tick = raw_notes[*chain.last().unwrap()].ticks as f64;
-        let channel = match channel_available_at
-            .iter()
-            .position(|&available_at| available_at < start_tick)
-        {
-            Some(index) => index,
-            None => channel_available_at
-                .iter()
-                .enumerate()
-                .min_by(|(_, left), (_, right)| left.total_cmp(right))
-                .map(|(index, _)| index)
-                .unwrap_or(0),
-        };
-        channel_available_at[channel] = channel_available_at[channel].max(end_tick);
-
-        let chain_decoration = is_decoration_slide_chain(&raw_notes, &chain);
-        let visible_relay_as_attachment = chain_has_curve_line(&raw_notes, &chain);
-        let is_hidden_head = is_hidden_head_slide_chain(&raw_notes, &chain, &standalone_tap_slots);
-        let mut previous_slide = NO_NOTE;
-        let mut head_slide = NO_NOTE;
-        let mut deferred_critical_taps = Vec::new();
-
-        for (index, &note_index) in chain.iter().enumerate() {
-            let note = &raw_notes[note_index];
-            let base = note.note_base_type;
-            let decoration = chain_decoration || is_decoration_slide_note(note);
-            let slide_type = get_slide_type(note, index + 1 == chain.len());
-            let output_note =
-                if slide_type == SlideType::Relay as i32 && is_visible_relay_attachment(note) {
-                    with_visible_relay_attachment_slot(note, &mut occupied_tap_slots)
-                } else {
-                    note.clone()
-                };
-
-            let slide =
-                builder.make_slide(note, &output_note, slide_type, channel as i32, decoration);
-            let slide_idx = builder.push_active(slide);
-
-            if head_slide == NO_NOTE {
-                head_slide = slide_idx;
-            }
-            if let Some(slide) = builder.notes[slide_idx].as_slide_mut() {
-                slide.head_idx = head_slide;
-            }
-            if previous_slide != NO_NOTE
-                && let Some(previous) = builder.notes[previous_slide].as_slide_mut()
-            {
-                previous.next_idx = slide_idx;
-            }
-
-            attach_connected_note(
-                &mut builder,
-                slide_idx,
-                note,
-                &output_note,
-                is_hidden_head && index == 0 && (base == 9 || base == 12),
-                &mut deferred_critical_taps,
-                &mut critical_slide_slots,
-            );
-
-            previous_slide = slide_idx;
-        }
-
-        for note in deferred_critical_taps {
-            if !standalone_tap_slots.contains(&note_slot_key(&note)) {
-                let tap = builder.make_tap(&note, &note, TapType::CriticalCancel as i32);
-                builder.push_active(tap);
-            }
-        }
-
-        let _ = visible_relay_as_attachment;
+        build_note_chain(
+            &raw_notes,
+            raw_chain,
+            &mut slots,
+            &mut channel_available_at,
+            &mut builder,
+        );
     }
 
     for note in &raw_notes {
@@ -440,14 +325,232 @@ fn parse_notes(
             add_standalone_note(
                 &mut builder,
                 note,
-                &connected_slide_slots,
-                &critical_slide_slots,
-                &hidden_head_slide_slots,
+                &slots.connected_slide_slots,
+                &slots.critical_slide_slots,
+                &slots.hidden_head_slide_slots,
             );
         }
     }
 
     builder.finish()
+}
+
+struct JsonNoteSlots {
+    connected_slide_slots: HashSet<NoteSlotKey>,
+    critical_slide_slots: HashSet<NoteSlotKey>,
+    hidden_head_slide_slots: HashSet<NoteSlotKey>,
+    standalone_tap_slots: HashSet<NoteSlotKey>,
+    occupied_tap_slots: HashSet<TapSlotKey>,
+}
+
+impl JsonNoteSlots {
+    fn new(notes: &[RawNote], chains: &[Vec<usize>], connected_ids: &HashSet<i64>) -> Self {
+        let connected_slide_slots = chains
+            .iter()
+            .flatten()
+            .map(|&note_idx| note_slot_key(&notes[note_idx]))
+            .collect();
+        let standalone_tap_slots = notes
+            .iter()
+            .filter(|note| !connected_ids.contains(&note.id))
+            .map(note_slot_key)
+            .collect::<HashSet<_>>();
+        let mut occupied_tap_slots = collect_connected_tap_slots(notes, chains);
+        for note in notes
+            .iter()
+            .filter(|note| !connected_ids.contains(&note.id))
+        {
+            reserve_tap_slot(&mut occupied_tap_slots, note);
+        }
+        let hidden_head_slide_slots = chains
+            .iter()
+            .filter(|chain| is_hidden_head_slide_chain(notes, chain, &standalone_tap_slots))
+            .map(|chain| note_slot_key(&notes[chain[0]]))
+            .collect();
+        Self {
+            connected_slide_slots,
+            critical_slide_slots: HashSet::new(),
+            hidden_head_slide_slots,
+            standalone_tap_slots,
+            occupied_tap_slots,
+        }
+    }
+}
+
+fn sorted_raw_notes(note_data: &[Value]) -> Vec<RawNote> {
+    let mut notes = note_data.iter().map(read_note).collect::<Vec<_>>();
+    notes.sort_by(|left, right| {
+        left.ticks
+            .cmp(&right.ticks)
+            .then(left.lane_start.cmp(&right.lane_start))
+            .then(left.id.cmp(&right.id))
+    });
+    notes
+}
+
+fn collect_connected_tap_slots(notes: &[RawNote], chains: &[Vec<usize>]) -> HashSet<TapSlotKey> {
+    let mut occupied = HashSet::new();
+    for raw_chain in chains {
+        let chain = remove_adjacent_visible_relay_duplicates(notes, raw_chain);
+        let visible_relay_as_attachment = chain_has_curve_line(notes, &chain);
+        for (index, &note_idx) in chain.iter().enumerate() {
+            let note = &notes[note_idx];
+            let slide_type = get_slide_type(note, index + 1 == chain.len());
+            if !is_visible_relay_attachment(note)
+                && connected_note_adds_tap(note, slide_type, visible_relay_as_attachment)
+            {
+                reserve_tap_slot(&mut occupied, note);
+            }
+        }
+    }
+    occupied
+}
+
+fn build_note_chain(
+    notes: &[RawNote],
+    raw_chain: &[usize],
+    slots: &mut JsonNoteSlots,
+    channel_available_at: &mut [f64; 36],
+    builder: &mut JsonNoteBuilder<'_>,
+) {
+    let chain = remove_adjacent_visible_relay_duplicates(notes, raw_chain);
+    if chain.is_empty() {
+        return;
+    }
+    let channel = allocate_slide_channel(notes, &chain, channel_available_at);
+    let decoration = is_decoration_slide_chain(notes, &chain);
+    let hidden_head = is_hidden_head_slide_chain(notes, &chain, &slots.standalone_tap_slots);
+    let mut state = ChainBuildState::default();
+    for (index, &note_idx) in chain.iter().enumerate() {
+        push_chain_note(
+            notes,
+            &chain,
+            index,
+            note_idx,
+            channel,
+            decoration,
+            hidden_head,
+            slots,
+            &mut state,
+            builder,
+        );
+    }
+    push_deferred_critical_taps(state.deferred_critical_taps, slots, builder);
+}
+
+struct ChainBuildState {
+    previous_slide: NoteIdx,
+    head_slide: NoteIdx,
+    deferred_critical_taps: Vec<RawNote>,
+}
+
+impl Default for ChainBuildState {
+    fn default() -> Self {
+        Self {
+            previous_slide: NO_NOTE,
+            head_slide: NO_NOTE,
+            deferred_critical_taps: Vec::new(),
+        }
+    }
+}
+
+fn allocate_slide_channel(
+    notes: &[RawNote],
+    chain: &[usize],
+    channel_available_at: &mut [f64; 36],
+) -> usize {
+    let start_tick = notes[chain[0]].ticks as f64;
+    let end_tick = notes[*chain.last().expect("non-empty slide chain")].ticks as f64;
+    let channel = channel_available_at
+        .iter()
+        .position(|&available_at| available_at < start_tick)
+        .or_else(|| {
+            channel_available_at
+                .iter()
+                .enumerate()
+                .min_by(|(_, left), (_, right)| left.total_cmp(right))
+                .map(|(index, _)| index)
+        })
+        .unwrap_or(0);
+    channel_available_at[channel] = channel_available_at[channel].max(end_tick);
+    channel
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_chain_note(
+    notes: &[RawNote],
+    chain: &[usize],
+    index: usize,
+    note_idx: usize,
+    channel: usize,
+    chain_decoration: bool,
+    hidden_head: bool,
+    slots: &mut JsonNoteSlots,
+    state: &mut ChainBuildState,
+    builder: &mut JsonNoteBuilder<'_>,
+) {
+    let note = &notes[note_idx];
+    let slide_type = get_slide_type(note, index + 1 == chain.len());
+    let output_note = output_note_for_slide(note, slide_type, &mut slots.occupied_tap_slots);
+    let decoration = chain_decoration || is_decoration_slide_note(note);
+    let slide = builder.make_slide(note, &output_note, slide_type, channel as i32, decoration);
+    let slide_idx = builder.push_active(slide);
+    link_chain_slide(slide_idx, state, builder);
+    let base = note.note_base_type;
+    attach_connected_note(
+        builder,
+        slide_idx,
+        note,
+        &output_note,
+        hidden_head && index == 0 && matches!(base, 9 | 12),
+        &mut state.deferred_critical_taps,
+        &mut slots.critical_slide_slots,
+    );
+}
+
+fn output_note_for_slide(
+    note: &RawNote,
+    slide_type: i32,
+    occupied_tap_slots: &mut HashSet<TapSlotKey>,
+) -> RawNote {
+    if slide_type == SlideType::Relay as i32 && is_visible_relay_attachment(note) {
+        with_visible_relay_attachment_slot(note, occupied_tap_slots)
+    } else {
+        note.clone()
+    }
+}
+
+fn link_chain_slide(
+    slide_idx: NoteIdx,
+    state: &mut ChainBuildState,
+    builder: &mut JsonNoteBuilder<'_>,
+) {
+    if state.head_slide == NO_NOTE {
+        state.head_slide = slide_idx;
+    }
+    if let Some(slide) = builder.notes[slide_idx].as_slide_mut() {
+        slide.head_idx = state.head_slide;
+    }
+    if state.previous_slide != NO_NOTE
+        && let Some(previous) = builder.notes[state.previous_slide].as_slide_mut()
+    {
+        previous.next_idx = slide_idx;
+    }
+    state.previous_slide = slide_idx;
+}
+
+fn push_deferred_critical_taps(
+    notes: Vec<RawNote>,
+    slots: &JsonNoteSlots,
+    builder: &mut JsonNoteBuilder<'_>,
+) {
+    for note in notes {
+        if slots.standalone_tap_slots.contains(&note_slot_key(&note)) {
+            continue;
+        }
+        let tap = builder.make_tap(&note, &note, TapType::CriticalCancel as i32);
+        builder.push_active(tap);
+    }
 }
 
 fn read_note(js: &Value) -> RawNote {
@@ -478,47 +581,53 @@ fn build_chains(notes: &[RawNote]) -> (Vec<Vec<usize>>, HashSet<i64>) {
     let mut chains = Vec::new();
 
     for (index, note) in notes.iter().enumerate() {
-        if visited.contains(&note.id) {
+        if !is_chain_start(note, &visited) {
             continue;
         }
-        if note.next_connection_id == -1 && note.previous_connection_id == -1 {
-            continue;
-        }
-        if note.previous_connection_id != -1 {
-            continue;
-        }
-
-        let mut chain = Vec::new();
-        let mut current = Some(index);
-        while let Some(current_index) = current {
-            let current_note = &notes[current_index];
-            if visited.contains(&current_note.id) {
-                break;
-            }
-
-            chain.push(current_index);
-            visited.insert(current_note.id);
-            current = if current_note.next_connection_id == -1 {
-                None
-            } else {
-                by_id.get(&current_note.next_connection_id).copied()
-            };
-        }
+        let chain = follow_chain(index, notes, &by_id, &mut visited);
         if !chain.is_empty() {
             chains.push(chain);
         }
     }
 
     for (index, note) in notes.iter().enumerate() {
-        if !visited.contains(&note.id)
-            && (note.next_connection_id != -1 || note.previous_connection_id != -1)
-        {
+        if is_unvisited_connected_note(note, &visited) {
             chains.push(vec![index]);
             visited.insert(note.id);
         }
     }
 
     (chains, visited)
+}
+
+fn is_chain_start(note: &RawNote, visited: &HashSet<i64>) -> bool {
+    !visited.contains(&note.id)
+        && note.previous_connection_id == -1
+        && note.next_connection_id != -1
+}
+
+fn follow_chain(
+    start: usize,
+    notes: &[RawNote],
+    by_id: &HashMap<i64, usize>,
+    visited: &mut HashSet<i64>,
+) -> Vec<usize> {
+    let mut chain = Vec::new();
+    let mut current = Some(start);
+    while let Some(current_index) = current {
+        let note = &notes[current_index];
+        if !visited.insert(note.id) {
+            break;
+        }
+        chain.push(current_index);
+        current = by_id.get(&note.next_connection_id).copied();
+    }
+    chain
+}
+
+fn is_unvisited_connected_note(note: &RawNote, visited: &HashSet<i64>) -> bool {
+    !visited.contains(&note.id)
+        && (note.next_connection_id != -1 || note.previous_connection_id != -1)
 }
 
 fn add_standalone_note(
@@ -586,50 +695,20 @@ fn attach_connected_note(
     deferred_critical_taps: &mut Vec<RawNote>,
     critical_slide_slots: &mut HashSet<NoteSlotKey>,
 ) {
-    let base = note.note_base_type;
     let (slide_type, decoration) = match &builder.notes[slide_idx] {
         NoteData::Slide(base, slide) => (base.note_type, slide.decoration),
         _ => return,
     };
-
-    let mut tap_idx = NO_NOTE;
-    let mut directional_idx = NO_NOTE;
-
-    if decoration && note.critical && (base == 10 || base == 13) {
-        tap_idx = builder.push_attached_tap(note, output_note, TapType::CriticalCancel as i32);
-        deferred_critical_taps.push(output_note.clone());
-        critical_slide_slots.insert(note_slot_key(output_note));
-    } else if is_hidden_head_start && (base == 9 || base == 12) {
-        tap_idx = builder.push_attached_tap(
-            note,
-            output_note,
-            if note.critical {
-                TapType::CriticalCancel as i32
-            } else {
-                TapType::Cancel as i32
-            },
-        );
-    } else if slide_type == SlideType::Relay as i32 && is_visible_relay_attachment(note) {
-        tap_idx = builder.push_attached_tap(note, output_note, TapType::Flick as i32);
-    } else if base == 3 || note.category == 3 {
-        if note.critical {
-            tap_idx = builder.push_attached_tap(note, output_note, TapType::Critical as i32);
-        }
-        directional_idx = builder.push_attached_directional(
-            note,
-            output_note,
-            direction_to_directional(note.direction),
-            tap_idx,
-        );
-    } else if matches!(base, 8 | 11 | 9 | 12) {
-        tap_idx = builder.push_attached_tap(
-            note,
-            output_note,
-            tap_type_from_json(note, TapType::Tap as i32),
-        );
-    } else if note.critical && (base == 1 || base == 2) {
-        tap_idx = builder.push_attached_tap(note, output_note, TapType::Critical as i32);
-    }
+    let (tap_idx, mut directional_idx) = base_connected_attachments(
+        builder,
+        note,
+        output_note,
+        slide_type,
+        decoration,
+        is_hidden_head_start,
+        deferred_critical_taps,
+        critical_slide_slots,
+    );
 
     let line_directional_type = line_type_to_directional(note.note_line_type);
     if line_directional_type != 0 {
@@ -637,13 +716,91 @@ fn attach_connected_note(
             builder.push_attached_directional(note, output_note, line_directional_type, tap_idx);
     }
 
-    if let Some(slide) = builder.notes[slide_idx].as_slide_mut() {
-        if tap_idx != NO_NOTE {
-            slide.tap_idx = tap_idx;
-        }
-        if directional_idx != NO_NOTE {
-            slide.directional_idx = directional_idx;
-        }
+    set_slide_attachments(&mut builder.notes[slide_idx], tap_idx, directional_idx);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn base_connected_attachments(
+    builder: &mut JsonNoteBuilder<'_>,
+    note: &RawNote,
+    output_note: &RawNote,
+    slide_type: i32,
+    decoration: bool,
+    is_hidden_head_start: bool,
+    deferred_critical_taps: &mut Vec<RawNote>,
+    critical_slide_slots: &mut HashSet<NoteSlotKey>,
+) -> (NoteIdx, NoteIdx) {
+    let base = note.note_base_type;
+    if decoration && note.critical && matches!(base, 10 | 13) {
+        let tap_idx = builder.push_attached_tap(note, output_note, TapType::CriticalCancel as i32);
+        deferred_critical_taps.push(output_note.clone());
+        critical_slide_slots.insert(note_slot_key(output_note));
+        return (tap_idx, NO_NOTE);
+    }
+    if is_hidden_head_start && matches!(base, 9 | 12) {
+        let tap_type = if note.critical {
+            TapType::CriticalCancel
+        } else {
+            TapType::Cancel
+        };
+        return (
+            builder.push_attached_tap(note, output_note, tap_type as i32),
+            NO_NOTE,
+        );
+    }
+    if slide_type == SlideType::Relay as i32 && is_visible_relay_attachment(note) {
+        return (
+            builder.push_attached_tap(note, output_note, TapType::Flick as i32),
+            NO_NOTE,
+        );
+    }
+    if base == 3 || note.category == 3 {
+        return connected_directional_attachments(builder, note, output_note);
+    }
+    if matches!(base, 8 | 11 | 9 | 12) {
+        let tap_type = tap_type_from_json(note, TapType::Tap as i32);
+        return (
+            builder.push_attached_tap(note, output_note, tap_type),
+            NO_NOTE,
+        );
+    }
+    if note.critical && matches!(base, 1 | 2) {
+        return (
+            builder.push_attached_tap(note, output_note, TapType::Critical as i32),
+            NO_NOTE,
+        );
+    }
+    (NO_NOTE, NO_NOTE)
+}
+
+fn connected_directional_attachments(
+    builder: &mut JsonNoteBuilder<'_>,
+    note: &RawNote,
+    output_note: &RawNote,
+) -> (NoteIdx, NoteIdx) {
+    let tap_idx = if note.critical {
+        builder.push_attached_tap(note, output_note, TapType::Critical as i32)
+    } else {
+        NO_NOTE
+    };
+    let directional_idx = builder.push_attached_directional(
+        note,
+        output_note,
+        direction_to_directional(note.direction),
+        tap_idx,
+    );
+    (tap_idx, directional_idx)
+}
+
+fn set_slide_attachments(note: &mut NoteData, tap_idx: NoteIdx, directional_idx: NoteIdx) {
+    let Some(slide) = note.as_slide_mut() else {
+        return;
+    };
+    if tap_idx != NO_NOTE {
+        slide.tap_idx = tap_idx;
+    }
+    if directional_idx != NO_NOTE {
+        slide.directional_idx = directional_idx;
     }
 }
 

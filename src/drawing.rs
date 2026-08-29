@@ -396,31 +396,46 @@ impl Drawing {
     }
 
     pub(crate) fn build_skill_covers(&mut self, score: &mut Score) {
-        if let Some(ref mm) = self.music_meta {
-            for e in &score.events.clone() {
-                if e.text.as_deref() == Some("SUPER FEVER!!") {
-                    let fever_end_bar = score.get_bar_by_time(mm.fever_end_time);
-                    self.special_cover_objects.push(CoverObject::Rect {
-                        bar_from: e.bar,
-                        css_class: "fever-duration".to_string(),
-                        bar_to: fever_end_bar,
-                    });
-                    self.special_cover_objects.push(CoverObject::Text {
-                        bar_from: e.bar,
-                        css_class: "skill-score".to_string(),
-                        text: format!("multi+{:.2}%", mm.fever_score * 100.0),
-                    });
-                }
-            }
-        }
+        self.build_fever_covers(score);
+        self.build_skill_event_covers(score);
+    }
 
+    fn build_fever_covers(&mut self, score: &mut Score) {
+        let Some((fever_end_time, fever_score)) = self
+            .music_meta
+            .as_ref()
+            .map(|music_meta| (music_meta.fever_end_time, music_meta.fever_score))
+        else {
+            return;
+        };
+        let fever_end_bar = score.get_bar_by_time(fever_end_time);
+        for event in score
+            .events
+            .clone()
+            .into_iter()
+            .filter(|event| event.text.as_deref() == Some("SUPER FEVER!!"))
+        {
+            self.special_cover_objects.push(CoverObject::Rect {
+                bar_from: event.bar,
+                css_class: "fever-duration".to_string(),
+                bar_to: fever_end_bar,
+            });
+            self.special_cover_objects.push(CoverObject::Text {
+                bar_from: event.bar,
+                css_class: "skill-score".to_string(),
+                text: format!("multi+{:.2}%", fever_score * 100.0),
+            });
+        }
+    }
+
+    fn build_skill_event_covers(&mut self, score: &mut Score) {
         let events = score.events.clone();
-        let mut skill_i = 0usize;
-        for e in &events {
-            if e.text.as_deref() != Some("SKILL") {
-                continue;
-            }
-            let skill_time = score.get_time_f64(e.bar);
+        for (skill_i, event) in events
+            .iter()
+            .filter(|event| event.text.as_deref() == Some("SKILL"))
+            .enumerate()
+        {
+            let skill_time = score.get_time_f64(event.bar);
             self.special_cover_objects.push(CoverObject::Rect {
                 bar_from: score.get_bar_by_time(skill_time - 5.0 / 60.0),
                 css_class: "skill-great".to_string(),
@@ -432,29 +447,32 @@ impl Drawing {
                 bar_to: score.get_bar_by_time(skill_time + 5.0 + 2.5 / 60.0),
             });
             self.special_cover_objects.push(CoverObject::Rect {
-                bar_from: e.bar,
+                bar_from: event.bar,
                 css_class: "skill-duration".to_string(),
                 bar_to: score.get_bar_by_time(skill_time + 5.0),
             });
 
-            if let Some(ref mm) = self.music_meta
-                && skill_i < mm.skill_score_solo.len()
-            {
-                let solo = format!("+{:.2}%", mm.skill_score_solo[skill_i] * 100.0);
-                let multi = format!("+{:.2}%", mm.skill_score_multi[skill_i] * 100.0);
-                let text = if solo != multi {
-                    format!("solo{solo} multi{multi}")
-                } else {
-                    solo
-                };
+            if let Some(text) = self.skill_score_text(skill_i) {
                 self.special_cover_objects.push(CoverObject::Text {
-                    bar_from: e.bar,
+                    bar_from: event.bar,
                     css_class: "skill-score".to_string(),
                     text,
                 });
             }
-            skill_i += 1;
         }
+    }
+
+    fn skill_score_text(&self, skill_idx: usize) -> Option<String> {
+        let music_meta = self.music_meta.as_ref()?;
+        let solo = music_meta.skill_score_solo.get(skill_idx)?;
+        let multi = music_meta.skill_score_multi.get(skill_idx)?;
+        let solo = format!("+{:.2}%", solo * 100.0);
+        let multi = format!("+{:.2}%", multi * 100.0);
+        Some(if solo == multi {
+            solo
+        } else {
+            format!("solo{solo} multi{multi}")
+        })
     }
 
     fn write_note_symbols(&self, svg: &mut String) {
@@ -603,208 +621,29 @@ impl Drawing {
 
         for (idx_in_active, &note_idx) in active.iter().enumerate() {
             let note = &notes_snapshot[note_idx];
-
-            if note.is_slide() {
-                // For slides, check if any part of the chain is in view
-                if let Some(slide) = note.as_slide() {
-                    let head_idx = slide.head_idx;
-                    if head_idx == NO_NOTE {
-                        continue;
-                    }
-                    let mut cur_idx = head_idx;
-                    let mut before = false;
-                    let mut found = false;
-                    loop {
-                        // Skip to path nodes
-                        let cur = &notes_snapshot[cur_idx];
-                        if let Some(s) = cur.as_slide()
-                            && !s.is_path(cur.note_type())
-                        {
-                            if s.next_idx == NO_NOTE {
-                                break;
-                            }
-                            cur_idx = s.next_idx;
-                            continue;
-                        }
-
-                        let bar = notes_snapshot[cur_idx].bar();
-                        if bar_start_f - Fraction::from_integer(1) <= bar
-                            && bar < bar_stop_f + Fraction::from_integer(1)
-                        {
-                            found = true;
-                            break;
-                        } else if bar < bar_start_f - Fraction::from_integer(1) {
-                            before = true;
-                        } else if before && bar_stop_f + Fraction::from_integer(1) < bar {
-                            found = true;
-                            break;
-                        }
-
-                        if let Some(s) = notes_snapshot[cur_idx].as_slide() {
-                            if s.next_idx == NO_NOTE {
-                                break;
-                            }
-                            cur_idx = s.next_idx;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    if !found {
-                        continue;
-                    }
-                }
-            } else {
-                // Non-slide: simple bar range check
-                let bar = note.bar();
-                if !(bar_start_f - Fraction::from_integer(1) <= bar
-                    && bar < bar_stop_f + Fraction::from_integer(1))
-                {
-                    continue;
-                }
+            if !sentence_note_visible(note, &notes_snapshot, bar_start_f, bar_stop_f) {
+                continue;
             }
 
-            // Tick text
-            let is_tick = note.is_tick(&notes_snapshot);
-            if let Some(tick_val) = is_tick {
-                if tick_val {
-                    // Find next tick note; if none, fall back to the note itself
-                    // (matches Python's `for/else: next_tick = note` — triggers the
-                    // "distance to next bar" branch in write_tick_text).
-                    let mut next_tick_idx: NoteIdx = note_idx;
-                    for &nidx in &active[idx_in_active..] {
-                        let n = &notes_snapshot[nidx];
-                        if n.is_tick(&notes_snapshot) == Some(true) && n.bar() > note.bar() {
-                            next_tick_idx = nidx;
-                            break;
-                        }
-                    }
-                    self.write_tick_text(
-                        score,
-                        &notes_snapshot,
-                        note_idx,
-                        Some(next_tick_idx),
-                        bar_stop_f,
-                        &mut tick_texts,
-                    );
-                } else {
-                    // is_tick == false: just a short line
-                    let y = cfg.time_height * score.get_time_delta_f64(note.bar(), bar_stop_f)
-                        + cfg.time_padding as f64;
-                    write!(
-                        tick_texts,
-                        r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="tick-line"/>"#,
-                        round(cfg.lane_padding as f64 - cfg.tick_2_length as f64),
-                        round(y),
-                        round(cfg.lane_padding as f64),
-                        round(y),
-                    )
-                    .unwrap();
-                }
-            }
+            self.write_sentence_tick(
+                score,
+                &notes_snapshot,
+                &active[idx_in_active..],
+                note_idx,
+                bar_stop_f,
+                &mut tick_texts,
+            );
 
-            // Render note
-            match note {
-                NoteData::Tap(..) => {
-                    self.write_note_image(
-                        score,
-                        &notes_snapshot,
-                        note_idx,
-                        bar_stop_f,
-                        &mut note_images,
-                    );
-                }
-                NoteData::Directional(..) => {
-                    self.write_flick_image(
-                        score,
-                        &notes_snapshot,
-                        note_idx,
-                        bar_stop_f,
-                        &mut flick_images_rev,
-                    );
-                    self.write_note_image(
-                        score,
-                        &notes_snapshot,
-                        note_idx,
-                        bar_stop_f,
-                        &mut note_images,
-                    );
-                }
-                NoteData::Slide(_, slide) => {
-                    if !slide.decoration {
-                        match SlideType::from_i32(note.note_type()) {
-                            Some(SlideType::Start) => {
-                                self.write_slide_path(
-                                    score,
-                                    &notes_snapshot,
-                                    note_idx,
-                                    bar_stop_f,
-                                    &mut slide_paths,
-                                    &mut among_images,
-                                );
-                                self.write_note_image(
-                                    score,
-                                    &notes_snapshot,
-                                    note_idx,
-                                    bar_stop_f,
-                                    &mut note_images,
-                                );
-                            }
-                            Some(SlideType::End) => {
-                                if slide.directional_idx != NO_NOTE {
-                                    self.write_flick_image(
-                                        score,
-                                        &notes_snapshot,
-                                        note_idx,
-                                        bar_stop_f,
-                                        &mut flick_images_rev,
-                                    );
-                                }
-                                self.write_note_image(
-                                    score,
-                                    &notes_snapshot,
-                                    note_idx,
-                                    bar_stop_f,
-                                    &mut note_images,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        if matches!(
-                            SlideType::from_i32(note.note_type()),
-                            Some(SlideType::Start)
-                        ) {
-                            self.write_slide_path(
-                                score,
-                                &notes_snapshot,
-                                note_idx,
-                                bar_stop_f,
-                                &mut slide_paths,
-                                &mut among_images,
-                            );
-                        }
-                        if slide.tap_idx != NO_NOTE {
-                            self.write_note_image(
-                                score,
-                                &notes_snapshot,
-                                slide.tap_idx,
-                                bar_stop_f,
-                                &mut note_images,
-                            );
-                            if slide.directional_idx != NO_NOTE {
-                                self.write_flick_image(
-                                    score,
-                                    &notes_snapshot,
-                                    note_idx,
-                                    bar_stop_f,
-                                    &mut flick_images_rev,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
+            self.write_sentence_note(
+                score,
+                &notes_snapshot,
+                note_idx,
+                bar_stop_f,
+                &mut slide_paths,
+                &mut among_images,
+                &mut note_images,
+                &mut flick_images_rev,
+            );
         }
 
         // Build the sentence SVG
@@ -829,271 +668,24 @@ impl Drawing {
         )
         .unwrap();
 
-        // Cover objects
-        for cover in &self.special_cover_objects {
-            match cover {
-                CoverObject::Text {
-                    bar_from,
-                    css_class,
-                    text,
-                } => {
-                    if *bar_from < bar_start_f - Fraction::from_f64(0.2)
-                        || *bar_from >= bar_stop_f - Fraction::from_f64(0.1)
-                    {
-                        continue;
-                    }
-                    let y = cfg.time_height * score.get_time_delta_f64(*bar_from, bar_stop_f)
-                        + cfg.time_padding as f64;
-                    let x = cfg.lane_width as f64 * cfg.n_lanes as f64
-                        + cfg.lane_padding as f64 * 2.0
-                        - 3.0;
-                    write!(
-                        svg,
-                        r#"<text x="{}" y="{}" transform="rotate(-90, {}, {})" class="{}">{}</text>"#,
-                        round(x), round(y), round(x), round(y),
-                        escape_xml(css_class), escape_xml(text),
-                    ).unwrap();
-                }
-                CoverObject::Rect {
-                    bar_from,
-                    css_class,
-                    bar_to,
-                } => {
-                    let cover_from = if *bar_from > bar_start_f - Fraction::from_f64(0.2) {
-                        *bar_from
-                    } else {
-                        bar_start_f - Fraction::from_f64(0.2)
-                    };
-                    let cover_to = if *bar_to < bar_stop_f + Fraction::from_f64(0.2) {
-                        *bar_to
-                    } else {
-                        bar_stop_f + Fraction::from_f64(0.2)
-                    };
-                    if cover_to <= cover_from {
-                        continue;
-                    }
-                    let y = cfg.time_height * score.get_time_delta_f64(cover_to, bar_stop_f)
-                        + cfg.time_padding as f64;
-                    let h = cfg.time_height * score.get_time_delta_f64(cover_from, cover_to);
-                    write!(
-                        svg,
-                        r#"<rect x="{}" y="{}" width="{}" height="{}" class="{}"/>"#,
-                        cfg.lane_padding,
-                        round(y),
-                        round(cfg.lane_width as f64 * cfg.n_lanes as f64),
-                        round(h),
-                        escape_xml(css_class),
-                    )
-                    .unwrap();
-                }
-            }
-        }
+        self.write_cover_objects(score, bar_start_f, bar_stop_f, &mut svg);
 
-        // Lane lines
-        for lane in (0..=cfg.n_lanes).step_by(2) {
-            let x = cfg.lane_width as f64 * lane as f64 + cfg.lane_padding as f64;
-            write!(
-                svg,
-                r#"<line x1="{}" y1="0" x2="{}" y2="{}" class="lane-line"/>"#,
-                round(x),
-                round(x),
-                round(height + cfg.time_padding as f64 * 2.0),
-            )
-            .unwrap();
-        }
+        self.write_lane_lines(height, &mut svg);
 
-        // Bar and beat lines
-        for bar in bar_start..=bar_stop {
-            let bar_f = Fraction::from_integer(bar as i64);
-            let y = cfg.time_height * score.get_time_delta_f64(bar_f, bar_stop_f)
-                + cfg.time_padding as f64;
-            let x1 = cfg.lane_width as f64 * 0.0 + cfg.lane_padding as f64;
-            let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64;
+        self.write_bar_and_beat_lines(score, bar_start, bar_stop, bar_stop_f, &mut svg);
 
-            write!(
-                svg,
-                r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="bar-line"/>"#,
-                round(x1),
-                round(y),
-                round(x2),
-                round(y),
-            )
-            .unwrap();
+        let print_events = self.write_event_flags(
+            score,
+            bar_start,
+            bar_stop,
+            bar_stop_f,
+            &mut svg,
+            &mut speed_lines,
+        );
 
-            let event = score.get_event(bar_f);
-            let bar_length = event
-                .bar_length
-                .unwrap_or(Fraction::from_integer(4))
-                .to_f64()
-                .ceil() as i32;
-            let bar_length_frac = event.bar_length.unwrap_or(Fraction::from_integer(4));
+        self.write_event_texts(score, &print_events, bar_start_f, bar_stop_f, &mut svg);
 
-            for beat_i in 1..bar_length {
-                let beat_bar = bar_f + Fraction::new(beat_i as i64, 1) / bar_length_frac;
-                let beat_y = cfg.time_height * score.get_time_delta_f64(beat_bar, bar_stop_f)
-                    + cfg.time_padding as f64;
-                write!(
-                    svg,
-                    r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="beat-line"/>"#,
-                    round(x1),
-                    round(beat_y),
-                    round(x2),
-                    round(beat_y),
-                )
-                .unwrap();
-            }
-        }
-
-        // Event labels
-        let mut print_events: Vec<Event> = Vec::new();
-        let mut all_events: Vec<Event> = (bar_start..=bar_stop)
-            .map(|i| Event::new(Fraction::from_integer(i as i64)))
-            .collect();
-        all_events.extend(score.events.clone());
-        all_events.sort_by(|a, b| {
-            a.bar
-                .partial_cmp(&b.bar)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        for event in &all_events {
-            if let Some(speed) = event.speed {
-                let y = cfg.time_height * score.get_time_delta_f64(event.bar, bar_stop_f)
-                    + cfg.time_padding as f64;
-                let x1 = cfg.lane_padding as f64;
-                let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64;
-
-                write!(
-                    speed_lines,
-                    r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="speed-line"/>"#,
-                    round(x1),
-                    round(y),
-                    round(x2),
-                    round(y),
-                )
-                .unwrap();
-                write!(
-                    speed_lines,
-                    r#"<text x="{}" y="{}" class="speed-text">{}x</text>"#,
-                    round(x2 - 2.0),
-                    round(y - 2.0),
-                    format_g(speed),
-                )
-                .unwrap();
-                continue;
-            }
-
-            if let Some(last) = print_events.last_mut() {
-                if (event.bar - last.bar).to_f64() <= 1.0 / 16.0 {
-                    last.merge_from(event);
-                } else {
-                    print_events.push(event.clone());
-                }
-            } else {
-                print_events.push(event.clone());
-            }
-
-            let special = event.bpm.is_some()
-                || event.bar_length.is_some()
-                || event.speed.is_some()
-                || event.section.is_some()
-                || event.text.is_some();
-
-            let y = cfg.time_height * score.get_time_delta_f64(event.bar, bar_stop_f)
-                + cfg.time_padding as f64;
-            write!(
-                svg,
-                r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="{}"/>"#,
-                round(cfg.lane_width as f64 * 0.0),
-                round(y),
-                round(cfg.lane_padding as f64),
-                round(y),
-                if special {
-                    "event-flag"
-                } else {
-                    "bar-count-flag"
-                },
-            )
-            .unwrap();
-        }
-
-        // Event text labels
-        for event in &print_events {
-            if !(bar_start_f - Fraction::from_integer(1) <= event.bar
-                && event.bar < bar_stop_f + Fraction::from_integer(1))
-            {
-                continue;
-            }
-
-            let mut parts: Vec<String> = Vec::new();
-            if event.bar.trunc() == *event.bar.numer() && *event.bar.denom() == 1 {
-                parts.push(format!("#{}", format_g(event.bar.to_f64())));
-            }
-            if let Some(bpm) = event.bpm {
-                parts.push(format!("{} BPM", format_g(bpm.to_f64())));
-            }
-            if let Some(bl) = event.bar_length {
-                parts.push(format!("{}/4", format_g(bl.to_f64())));
-            }
-            if let Some(ref section) = event.section {
-                parts.push(section.clone());
-            }
-            if let Some(ref text) = event.text {
-                parts.push(text.clone());
-            }
-
-            let text = parts.join(", ");
-            if text.is_empty() {
-                continue;
-            }
-
-            let special = event.bpm.is_some()
-                || event.bar_length.is_some()
-                || event.speed.is_some()
-                || event.section.is_some()
-                || event.text.is_some();
-
-            let y = cfg.time_height * score.get_time_delta_f64(event.bar, bar_stop_f)
-                + cfg.time_padding as f64;
-            write!(
-                svg,
-                r#"<text x="{}" y="{}" transform="rotate(-90, {}, {})" class="{}">{}</text>"#,
-                round(cfg.lane_padding as f64 + 8.0),
-                round(y - cfg.lane_width as f64 * 1.5),
-                round(cfg.lane_padding as f64),
-                round(y),
-                if special {
-                    "event-text"
-                } else {
-                    "bar-count-text"
-                },
-                escape_xml(&text),
-            )
-            .unwrap();
-        }
-
-        // Lyrics
-        if let Some(lyric) = lyric {
-            for word in &lyric.words {
-                if !(bar_start_f - Fraction::from_integer(1) <= word.bar
-                    && word.bar < bar_stop_f + Fraction::from_integer(1))
-                {
-                    continue;
-                }
-                let y = cfg.time_height * score.get_time_delta_f64(word.bar, bar_stop_f)
-                    + cfg.time_padding as f64;
-                let x = cfg.lane_width as f64 * cfg.n_lanes as f64 + cfg.lane_padding as f64;
-                write!(
-                    svg,
-                    r#"<text x="{}" y="{}" transform="rotate(-90, {}, {})" class="lyric-text">{}</text>"#,
-                    round(x),
-                    round(y + 16.0),
-                    round(x),
-                    round(y),
-                    escape_xml(&word.text),
-                ).unwrap();
-            }
-        }
+        self.write_lyrics(score, lyric, bar_start_f, bar_stop_f, &mut svg);
 
         // Layer order: slides → notes → amongs → flicks (reversed) → ticks → speed lines
         // Speed lines are drawn last so they appear on top of notes for readability.
@@ -1109,6 +701,461 @@ impl Drawing {
         (svg, width, height + cfg.time_padding as f64 * 2.0)
     }
 
+    fn write_sentence_tick(
+        &self,
+        score: &mut Score,
+        arena: &[NoteData],
+        remaining_active: &[NoteIdx],
+        note_idx: NoteIdx,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        match arena[note_idx].is_tick(arena) {
+            Some(true) => {
+                let next_idx = next_tick_note(arena, remaining_active, note_idx);
+                self.write_tick_text(score, arena, note_idx, Some(next_idx), bar_stop, out);
+            }
+            Some(false) => self.write_short_tick_line(score, &arena[note_idx], bar_stop, out),
+            None => {}
+        }
+    }
+
+    fn write_short_tick_line(
+        &self,
+        score: &mut Score,
+        note: &NoteData,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        let y = self.config.time_height * score.get_time_delta_f64(note.bar(), bar_stop)
+            + self.config.time_padding as f64;
+        write!(
+            out,
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="tick-line"/>"#,
+            round(self.config.lane_padding as f64 - self.config.tick_2_length as f64),
+            round(y),
+            round(self.config.lane_padding as f64),
+            round(y),
+        )
+        .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_sentence_note(
+        &self,
+        score: &mut Score,
+        arena: &[NoteData],
+        note_idx: NoteIdx,
+        bar_stop: Fraction,
+        slide_paths: &mut String,
+        among_images: &mut String,
+        note_images: &mut String,
+        flick_images: &mut Vec<String>,
+    ) {
+        match &arena[note_idx] {
+            NoteData::Tap(..) => {
+                self.write_note_image(score, arena, note_idx, bar_stop, note_images);
+            }
+            NoteData::Directional(..) => {
+                self.write_flick_image(score, arena, note_idx, bar_stop, flick_images);
+                self.write_note_image(score, arena, note_idx, bar_stop, note_images);
+            }
+            NoteData::Slide(_, slide) if slide.decoration => self.write_decoration_slide_note(
+                score,
+                arena,
+                note_idx,
+                slide,
+                bar_stop,
+                slide_paths,
+                among_images,
+                note_images,
+                flick_images,
+            ),
+            NoteData::Slide(_, slide) => self.write_standard_slide_note(
+                score,
+                arena,
+                note_idx,
+                slide,
+                bar_stop,
+                slide_paths,
+                among_images,
+                note_images,
+                flick_images,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_standard_slide_note(
+        &self,
+        score: &mut Score,
+        arena: &[NoteData],
+        note_idx: NoteIdx,
+        slide: &crate::notes::slide::Slide,
+        bar_stop: Fraction,
+        slide_paths: &mut String,
+        among_images: &mut String,
+        note_images: &mut String,
+        flick_images: &mut Vec<String>,
+    ) {
+        match SlideType::from_i32(arena[note_idx].note_type()) {
+            Some(SlideType::Start) => {
+                self.write_slide_path(score, arena, note_idx, bar_stop, slide_paths, among_images);
+                self.write_note_image(score, arena, note_idx, bar_stop, note_images);
+            }
+            Some(SlideType::End) => {
+                if slide.directional_idx != NO_NOTE {
+                    self.write_flick_image(score, arena, note_idx, bar_stop, flick_images);
+                }
+                self.write_note_image(score, arena, note_idx, bar_stop, note_images);
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_decoration_slide_note(
+        &self,
+        score: &mut Score,
+        arena: &[NoteData],
+        note_idx: NoteIdx,
+        slide: &crate::notes::slide::Slide,
+        bar_stop: Fraction,
+        slide_paths: &mut String,
+        among_images: &mut String,
+        note_images: &mut String,
+        flick_images: &mut Vec<String>,
+    ) {
+        if matches!(
+            SlideType::from_i32(arena[note_idx].note_type()),
+            Some(SlideType::Start)
+        ) {
+            self.write_slide_path(score, arena, note_idx, bar_stop, slide_paths, among_images);
+        }
+        if slide.tap_idx == NO_NOTE {
+            return;
+        }
+        self.write_note_image(score, arena, slide.tap_idx, bar_stop, note_images);
+        if slide.directional_idx != NO_NOTE {
+            self.write_flick_image(score, arena, note_idx, bar_stop, flick_images);
+        }
+    }
+
+    fn write_cover_objects(
+        &self,
+        score: &mut Score,
+        bar_start: Fraction,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        for cover in &self.special_cover_objects {
+            match cover {
+                CoverObject::Text {
+                    bar_from,
+                    css_class,
+                    text,
+                } => self
+                    .write_text_cover(score, *bar_from, css_class, text, bar_start, bar_stop, out),
+                CoverObject::Rect {
+                    bar_from,
+                    css_class,
+                    bar_to,
+                } => self.write_rect_cover(
+                    score, *bar_from, *bar_to, css_class, bar_start, bar_stop, out,
+                ),
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_text_cover(
+        &self,
+        score: &mut Score,
+        bar_from: Fraction,
+        css_class: &str,
+        text: &str,
+        bar_start: Fraction,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        if bar_from < bar_start - Fraction::from_f64(0.2)
+            || bar_from >= bar_stop - Fraction::from_f64(0.1)
+        {
+            return;
+        }
+        let y = self.config.time_height * score.get_time_delta_f64(bar_from, bar_stop)
+            + self.config.time_padding as f64;
+        let x = self.config.lane_width as f64 * self.config.n_lanes as f64
+            + self.config.lane_padding as f64 * 2.0
+            - 3.0;
+        write!(
+            out,
+            r#"<text x="{}" y="{}" transform="rotate(-90, {}, {})" class="{}">{}</text>"#,
+            round(x),
+            round(y),
+            round(x),
+            round(y),
+            escape_xml(css_class),
+            escape_xml(text),
+        )
+        .unwrap();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_rect_cover(
+        &self,
+        score: &mut Score,
+        bar_from: Fraction,
+        bar_to: Fraction,
+        css_class: &str,
+        bar_start: Fraction,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        let cover_from = bar_from.max(bar_start - Fraction::from_f64(0.2));
+        let cover_to = bar_to.min(bar_stop + Fraction::from_f64(0.2));
+        if cover_to <= cover_from {
+            return;
+        }
+        let y = self.config.time_height * score.get_time_delta_f64(cover_to, bar_stop)
+            + self.config.time_padding as f64;
+        let height = self.config.time_height * score.get_time_delta_f64(cover_from, cover_to);
+        write!(
+            out,
+            r#"<rect x="{}" y="{}" width="{}" height="{}" class="{}"/>"#,
+            self.config.lane_padding,
+            round(y),
+            round(self.config.lane_width as f64 * self.config.n_lanes as f64),
+            round(height),
+            escape_xml(css_class),
+        )
+        .unwrap();
+    }
+
+    fn write_lane_lines(&self, height: f64, out: &mut String) {
+        for lane in (0..=self.config.n_lanes).step_by(2) {
+            let x = self.config.lane_width as f64 * lane as f64 + self.config.lane_padding as f64;
+            write!(
+                out,
+                r#"<line x1="{}" y1="0" x2="{}" y2="{}" class="lane-line"/>"#,
+                round(x),
+                round(x),
+                round(height + self.config.time_padding as f64 * 2.0),
+            )
+            .unwrap();
+        }
+    }
+
+    fn write_bar_and_beat_lines(
+        &self,
+        score: &mut Score,
+        bar_start: i32,
+        bar_stop: i32,
+        bar_stop_fraction: Fraction,
+        out: &mut String,
+    ) {
+        for bar in bar_start..=bar_stop {
+            let bar = Fraction::from_integer(bar as i64);
+            self.write_bar_line(score, bar, bar_stop_fraction, out);
+            self.write_beat_lines(score, bar, bar_stop_fraction, out);
+        }
+    }
+
+    fn write_bar_line(
+        &self,
+        score: &mut Score,
+        bar: Fraction,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        let y = self.config.time_height * score.get_time_delta_f64(bar, bar_stop)
+            + self.config.time_padding as f64;
+        let x1 = self.config.lane_padding as f64;
+        let x2 = self.config.lane_width as f64 * self.config.n_lanes as f64 + x1;
+        write!(
+            out,
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="bar-line"/>"#,
+            round(x1),
+            round(y),
+            round(x2),
+            round(y),
+        )
+        .unwrap();
+    }
+
+    fn write_beat_lines(
+        &self,
+        score: &mut Score,
+        bar: Fraction,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        let bar_length = score
+            .get_event(bar)
+            .bar_length
+            .unwrap_or(Fraction::from_integer(4));
+        let x1 = self.config.lane_padding as f64;
+        let x2 = self.config.lane_width as f64 * self.config.n_lanes as f64 + x1;
+        for beat_idx in 1..bar_length.to_f64().ceil() as i32 {
+            let beat_bar = bar + Fraction::new(beat_idx as i64, 1) / bar_length;
+            let y = self.config.time_height * score.get_time_delta_f64(beat_bar, bar_stop)
+                + self.config.time_padding as f64;
+            write!(
+                out,
+                r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="beat-line"/>"#,
+                round(x1),
+                round(y),
+                round(x2),
+                round(y),
+            )
+            .unwrap();
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_event_flags(
+        &self,
+        score: &mut Score,
+        bar_start: i32,
+        bar_stop: i32,
+        bar_stop_fraction: Fraction,
+        out: &mut String,
+        speed_lines: &mut String,
+    ) -> Vec<Event> {
+        let mut print_events = Vec::new();
+        for event in sentence_events(score, bar_start, bar_stop) {
+            if let Some(speed) = event.speed {
+                self.write_speed_event(score, &event, speed, bar_stop_fraction, speed_lines);
+                continue;
+            }
+            merge_print_event(&mut print_events, &event);
+            self.write_event_flag(score, &event, bar_stop_fraction, out);
+        }
+        print_events
+    }
+
+    fn write_speed_event(
+        &self,
+        score: &mut Score,
+        event: &Event,
+        speed: f64,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        let y = self.config.time_height * score.get_time_delta_f64(event.bar, bar_stop)
+            + self.config.time_padding as f64;
+        let x1 = self.config.lane_padding as f64;
+        let x2 = self.config.lane_width as f64 * self.config.n_lanes as f64 + x1;
+        write!(
+            out,
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}" class="speed-line"/>"#,
+            round(x1),
+            round(y),
+            round(x2),
+            round(y),
+        )
+        .unwrap();
+        write!(
+            out,
+            r#"<text x="{}" y="{}" class="speed-text">{}x</text>"#,
+            round(x2 - 2.0),
+            round(y - 2.0),
+            format_g(speed),
+        )
+        .unwrap();
+    }
+
+    fn write_event_flag(
+        &self,
+        score: &mut Score,
+        event: &Event,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        let y = self.config.time_height * score.get_time_delta_f64(event.bar, bar_stop)
+            + self.config.time_padding as f64;
+        write!(
+            out,
+            r#"<line x1="0" y1="{}" x2="{}" y2="{}" class="{}"/>"#,
+            round(y),
+            round(self.config.lane_padding as f64),
+            round(y),
+            if event_is_special(event) {
+                "event-flag"
+            } else {
+                "bar-count-flag"
+            },
+        )
+        .unwrap();
+    }
+
+    fn write_event_texts(
+        &self,
+        score: &mut Score,
+        events: &[Event],
+        bar_start: Fraction,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        for event in events {
+            if !bar_in_sentence(event.bar, bar_start, bar_stop) {
+                continue;
+            }
+            let text = event_label(event);
+            if text.is_empty() {
+                continue;
+            }
+            let y = self.config.time_height * score.get_time_delta_f64(event.bar, bar_stop)
+                + self.config.time_padding as f64;
+            write!(
+                out,
+                r#"<text x="{}" y="{}" transform="rotate(-90, {}, {})" class="{}">{}</text>"#,
+                round(self.config.lane_padding as f64 + 8.0),
+                round(y - self.config.lane_width as f64 * 1.5),
+                round(self.config.lane_padding as f64),
+                round(y),
+                if event_is_special(event) {
+                    "event-text"
+                } else {
+                    "bar-count-text"
+                },
+                escape_xml(&text),
+            )
+            .unwrap();
+        }
+    }
+
+    fn write_lyrics(
+        &self,
+        score: &mut Score,
+        lyric: Option<&Lyric>,
+        bar_start: Fraction,
+        bar_stop: Fraction,
+        out: &mut String,
+    ) {
+        let Some(lyric) = lyric else { return };
+        for word in lyric
+            .words
+            .iter()
+            .filter(|word| bar_in_sentence(word.bar, bar_start, bar_stop))
+        {
+            let y = self.config.time_height * score.get_time_delta_f64(word.bar, bar_stop)
+                + self.config.time_padding as f64;
+            let x = self.config.lane_width as f64 * self.config.n_lanes as f64
+                + self.config.lane_padding as f64;
+            write!(
+                out,
+                r#"<text x="{}" y="{}" transform="rotate(-90, {}, {})" class="lyric-text">{}</text>"#,
+                round(x),
+                round(y + 16.0),
+                round(x),
+                round(y),
+                escape_xml(&word.text),
+            )
+            .unwrap();
+        }
+    }
+
     fn write_slide_path(
         &self,
         score: &mut Score,
@@ -1118,131 +1165,77 @@ impl Drawing {
         slide_paths: &mut String,
         among_images: &mut String,
     ) {
-        let cfg = &self.config;
-        let mut lefts: Vec<[(f64, f64); 4]> = Vec::new();
-        let mut rights: Vec<[(f64, f64); 4]> = Vec::new();
+        let (lefts, rights) =
+            self.collect_slide_edges(score, arena, start_idx, bar_stop, among_images);
+        if lefts.is_empty() {
+            return;
+        }
+        let class_name = slide_path_class(&arena[start_idx], arena);
+        let d = slide_path_data(&lefts, &rights);
+        write!(slide_paths, r#"<path d="{d}" class="{class_name}"/>"#).unwrap();
+    }
 
-        let mut cur_idx = start_idx;
-
+    fn collect_slide_edges(
+        &self,
+        score: &mut Score,
+        arena: &[NoteData],
+        start_idx: NoteIdx,
+        bar_stop: Fraction,
+        among_images: &mut String,
+    ) -> (Vec<BezierPoints>, Vec<BezierPoints>) {
+        let mut lefts = Vec::new();
+        let mut rights = Vec::new();
+        let mut current_idx = start_idx;
         loop {
-            let cur_type = arena[cur_idx].note_type();
-            if matches!(SlideType::from_i32(cur_type), Some(SlideType::End)) {
+            if matches!(
+                SlideType::from_i32(arena[current_idx].note_type()),
+                Some(SlideType::End)
+            ) {
                 break;
             }
-
-            let slide = match arena[cur_idx].as_slide() {
-                Some(s) => s,
-                None => break,
+            let Some(slide) = arena[current_idx].as_slide() else {
+                break;
             };
             if slide.next_idx == NO_NOTE {
                 break;
             }
-
-            let mut amongs: Vec<NoteIdx> = Vec::new();
-            let mut next_idx = slide.next_idx;
-
-            loop {
-                let next_type = arena[next_idx].note_type();
-                if matches!(SlideType::from_i32(next_type), Some(SlideType::Relay)) {
-                    amongs.push(next_idx);
-                }
-
-                let next_slide = match arena[next_idx].as_slide() {
-                    Some(s) => s,
-                    None => break,
-                };
-                if next_slide.is_path(next_type) {
-                    break;
-                }
-                if next_slide.next_idx == NO_NOTE {
-                    break;
-                }
-                next_idx = next_slide.next_idx;
-            }
-
-            let (l, r) = self.get_bezier_coordinates(score, arena, cur_idx, next_idx, bar_stop);
-            lefts.push(l);
-            rights.push(r);
-
-            // Add among images
-            for &among_idx in &amongs {
-                let among_bar = arena[among_idx].bar();
-                let y = cfg.time_height * score.get_time_delta_f64(among_bar, bar_stop)
-                    + cfg.time_padding as f64;
-                let x_l = binary_solution_for_x(y, &l);
-                let x_r = binary_solution_for_x(y, &r);
-                let x = (x_l + x_r) / 2.0;
-                let w = cfg.lane_width as f64;
-                let h = cfg.lane_width as f64;
-
-                let is_crit = arena[among_idx].is_critical(arena);
-                self.write_long_among_image(is_crit, x - w / 2.0, y - h / 2.0, w, h, among_images);
-            }
-
-            cur_idx = next_idx;
+            let (next_idx, amongs) = next_slide_path_node(arena, slide.next_idx);
+            let (left, right) =
+                self.get_bezier_coordinates(score, arena, current_idx, next_idx, bar_stop);
+            self.write_slide_amongs(score, arena, &amongs, bar_stop, &left, &right, among_images);
+            lefts.push(left);
+            rights.push(right);
+            current_idx = next_idx;
         }
+        (lefts, rights)
+    }
 
-        if lefts.is_empty() {
-            return;
+    #[allow(clippy::too_many_arguments)]
+    fn write_slide_amongs(
+        &self,
+        score: &mut Score,
+        arena: &[NoteData],
+        amongs: &[NoteIdx],
+        bar_stop: Fraction,
+        left: &BezierPoints,
+        right: &BezierPoints,
+        out: &mut String,
+    ) {
+        let size = self.config.lane_width as f64;
+        for &among_idx in amongs {
+            let y = self.config.time_height
+                * score.get_time_delta_f64(arena[among_idx].bar(), bar_stop)
+                + self.config.time_padding as f64;
+            let x = (binary_solution_for_x(y, left) + binary_solution_for_x(y, right)) / 2.0;
+            self.write_long_among_image(
+                arena[among_idx].is_critical(arena),
+                x - size / 2.0,
+                y - size / 2.0,
+                size,
+                size,
+                out,
+            );
         }
-
-        // Build path data
-        let is_critical = arena[start_idx].is_critical(arena);
-        let is_decoration = arena[start_idx]
-            .as_slide()
-            .map(|s| s.decoration)
-            .unwrap_or(false);
-
-        let class_name = if is_decoration {
-            if is_critical {
-                "decoration-critical"
-            } else {
-                "decoration"
-            }
-        } else if is_critical {
-            "slide-critical"
-        } else {
-            "slide"
-        };
-
-        let mut d = String::new();
-        // Forward left edges
-        for (i, l) in lefts.iter().enumerate() {
-            if i == 0 {
-                write!(d, "M{},{}", round(l[0].0), round(l[0].1)).unwrap();
-            }
-            write!(
-                d,
-                "C{},{},{},{},{},{}",
-                round(l[1].0),
-                round(l[1].1),
-                round(l[2].0),
-                round(l[2].1),
-                round(l[3].0),
-                round(l[3].1),
-            )
-            .unwrap();
-        }
-        // Reverse right edges
-        for (i, r) in rights.iter().rev().enumerate() {
-            if i == 0 {
-                write!(d, "L{},{}", round(r[3].0), round(r[3].1)).unwrap();
-            }
-            write!(
-                d,
-                "C{},{},{},{},{},{}",
-                round(r[2].0),
-                round(r[2].1),
-                round(r[1].0),
-                round(r[1].1),
-                round(r[0].0),
-                round(r[0].1),
-            )
-            .unwrap();
-        }
-        d.push('z');
-
-        write!(slide_paths, r#"<path d="{d}" class="{class_name}"/>"#).unwrap();
     }
 
     fn get_bezier_coordinates(
@@ -1262,30 +1255,12 @@ impl Drawing {
         let y_1 = cfg.time_height * score.get_time_delta_f64(slide_1.bar(), bar_stop)
             + cfg.time_padding as f64;
 
-        let ease_in = slide_0
-            .as_slide()
-            .and_then(|s| {
-                if s.directional_idx != NO_NOTE {
-                    DirectionalType::from_i32(arena[s.directional_idx].note_type())
-                        .filter(|dt| matches!(dt, DirectionalType::Down))
-                } else {
-                    None
-                }
-            })
-            .is_some();
-
-        let ease_out = slide_0
-            .as_slide()
-            .and_then(|s| {
-                if s.directional_idx != NO_NOTE {
-                    DirectionalType::from_i32(arena[s.directional_idx].note_type()).filter(|dt| {
-                        matches!(dt, DirectionalType::LowerLeft | DirectionalType::LowerRight)
-                    })
-                } else {
-                    None
-                }
-            })
-            .is_some();
+        let curve_direction = slide_curve_direction(slide_0, arena);
+        let ease_in = matches!(curve_direction, Some(DirectionalType::Down));
+        let ease_out = matches!(
+            curve_direction,
+            Some(DirectionalType::LowerLeft | DirectionalType::LowerRight)
+        );
 
         let is_decoration = slide_0.as_slide().map(|s| s.decoration).unwrap_or(false);
         let spp = if is_decoration {
@@ -1345,38 +1320,10 @@ impl Drawing {
             return;
         }
 
-        let note_number;
         if note.is_trend(arena) {
-            // Add friction among image
             self.write_friction_among_image(score, arena, note_idx, bar_stop, out);
-            if note.is_critical(arena) {
-                note_number = 5;
-            } else if note.is_directional() {
-                note_number = 6;
-            } else {
-                note_number = 4;
-            }
-        } else if note.is_critical(arena) {
-            note_number = 0;
-        } else if note.is_directional() {
-            note_number = 3;
-        } else if note.is_slide() {
-            if matches!(SlideType::from_i32(note.note_type()), Some(SlideType::End)) {
-                if let Some(s) = note.as_slide() {
-                    if s.directional_idx != NO_NOTE {
-                        note_number = 3;
-                    } else {
-                        note_number = 1;
-                    }
-                } else {
-                    note_number = 1;
-                }
-            } else {
-                note_number = 1;
-            }
-        } else {
-            note_number = 2;
         }
+        let note_number = note_image_number(note, arena);
 
         write!(
             out,
@@ -1485,23 +1432,7 @@ impl Drawing {
             return;
         }
 
-        let dir_type = if note.is_directional() {
-            DirectionalType::from_i32(note.note_type())
-        } else if note.is_slide() {
-            if let Some(s) = note.as_slide() {
-                if s.directional_idx != NO_NOTE {
-                    DirectionalType::from_i32(arena[s.directional_idx].note_type())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        let flick_type = match dir_type {
+        let flick_type = match note_directional_type(note, arena) {
             Some(DirectionalType::UpperLeft) => Some(DirectionalType::UpperLeft),
             Some(DirectionalType::UpperRight) => Some(DirectionalType::UpperRight),
             Some(DirectionalType::Up) => Some(DirectionalType::Up),
@@ -1509,10 +1440,7 @@ impl Drawing {
             None => Some(DirectionalType::Up),
         };
 
-        let flick_type = match flick_type {
-            Some(t) => t,
-            None => return,
-        };
+        let Some(flick_type) = flick_type else { return };
 
         let width = if note.width() < 6 { note.width() } else { 6 };
         let h0 = cfg.flick_height as f64;
@@ -1655,6 +1583,245 @@ impl Drawing {
         )
         .unwrap();
     }
+}
+
+fn sentence_note_visible(
+    note: &NoteData,
+    arena: &[NoteData],
+    bar_start: Fraction,
+    bar_stop: Fraction,
+) -> bool {
+    if !note.is_slide() {
+        return bar_in_sentence(note.bar(), bar_start, bar_stop);
+    }
+    note.as_slide()
+        .is_some_and(|slide| slide_chain_visible(slide.head_idx, arena, bar_start, bar_stop))
+}
+
+fn slide_chain_visible(
+    head_idx: NoteIdx,
+    arena: &[NoteData],
+    bar_start: Fraction,
+    bar_stop: Fraction,
+) -> bool {
+    if head_idx == NO_NOTE {
+        return false;
+    }
+    let mut current_idx = next_visible_slide_path_node(head_idx, arena);
+    let mut found_before = false;
+    while let Some(note_idx) = current_idx {
+        let bar = arena[note_idx].bar();
+        if bar_in_sentence(bar, bar_start, bar_stop) {
+            return true;
+        }
+        if bar < bar_start - Fraction::from_integer(1) {
+            found_before = true;
+        } else if found_before && bar_stop + Fraction::from_integer(1) < bar {
+            return true;
+        }
+        current_idx = following_visible_slide_path_node(note_idx, arena);
+    }
+    false
+}
+
+fn next_visible_slide_path_node(start_idx: NoteIdx, arena: &[NoteData]) -> Option<NoteIdx> {
+    let mut note_idx = start_idx;
+    loop {
+        let note = &arena[note_idx];
+        let slide = note.as_slide()?;
+        if slide.is_path(note.note_type()) {
+            return Some(note_idx);
+        }
+        if slide.next_idx == NO_NOTE {
+            return None;
+        }
+        note_idx = slide.next_idx;
+    }
+}
+
+fn following_visible_slide_path_node(note_idx: NoteIdx, arena: &[NoteData]) -> Option<NoteIdx> {
+    let next_idx = arena[note_idx].as_slide()?.next_idx;
+    (next_idx != NO_NOTE)
+        .then(|| next_visible_slide_path_node(next_idx, arena))
+        .flatten()
+}
+
+fn next_tick_note(arena: &[NoteData], active: &[NoteIdx], note_idx: NoteIdx) -> NoteIdx {
+    active
+        .iter()
+        .copied()
+        .find(|&candidate_idx| {
+            arena[candidate_idx].is_tick(arena) == Some(true)
+                && arena[candidate_idx].bar() > arena[note_idx].bar()
+        })
+        .unwrap_or(note_idx)
+}
+
+fn sentence_events(score: &Score, bar_start: i32, bar_stop: i32) -> Vec<Event> {
+    let mut events = (bar_start..=bar_stop)
+        .map(|bar| Event::new(Fraction::from_integer(bar as i64)))
+        .collect::<Vec<_>>();
+    events.extend(score.events.clone());
+    events.sort_by(|left, right| {
+        left.bar
+            .partial_cmp(&right.bar)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    events
+}
+
+fn merge_print_event(events: &mut Vec<Event>, event: &Event) {
+    let Some(last) = events.last_mut() else {
+        events.push(event.clone());
+        return;
+    };
+    if (event.bar - last.bar).to_f64() <= 1.0 / 16.0 {
+        last.merge_from(event);
+    } else {
+        events.push(event.clone());
+    }
+}
+
+fn event_is_special(event: &Event) -> bool {
+    event.bpm.is_some()
+        || event.bar_length.is_some()
+        || event.speed.is_some()
+        || event.section.is_some()
+        || event.text.is_some()
+}
+
+fn event_label(event: &Event) -> String {
+    let mut parts = Vec::new();
+    if event.bar.trunc() == *event.bar.numer() && *event.bar.denom() == 1 {
+        parts.push(format!("#{}", format_g(event.bar.to_f64())));
+    }
+    if let Some(bpm) = event.bpm {
+        parts.push(format!("{} BPM", format_g(bpm.to_f64())));
+    }
+    if let Some(bar_length) = event.bar_length {
+        parts.push(format!("{}/4", format_g(bar_length.to_f64())));
+    }
+    if let Some(section) = &event.section {
+        parts.push(section.clone());
+    }
+    if let Some(text) = &event.text {
+        parts.push(text.clone());
+    }
+    parts.join(", ")
+}
+
+fn bar_in_sentence(bar: Fraction, bar_start: Fraction, bar_stop: Fraction) -> bool {
+    bar_start - Fraction::from_integer(1) <= bar && bar < bar_stop + Fraction::from_integer(1)
+}
+
+fn slide_curve_direction(note: &NoteData, arena: &[NoteData]) -> Option<DirectionalType> {
+    let directional_idx = note.as_slide()?.directional_idx;
+    (directional_idx != NO_NOTE)
+        .then(|| DirectionalType::from_i32(arena[directional_idx].note_type()))
+        .flatten()
+}
+
+fn note_directional_type(note: &NoteData, arena: &[NoteData]) -> Option<DirectionalType> {
+    if note.is_directional() {
+        return DirectionalType::from_i32(note.note_type());
+    }
+    slide_curve_direction(note, arena)
+}
+
+fn note_image_number(note: &NoteData, arena: &[NoteData]) -> i32 {
+    if note.is_trend(arena) {
+        return if note.is_critical(arena) {
+            5
+        } else if note.is_directional() {
+            6
+        } else {
+            4
+        };
+    }
+    if note.is_critical(arena) {
+        return 0;
+    }
+    if note.is_directional() {
+        return 3;
+    }
+    if !note.is_slide() {
+        return 2;
+    }
+    let is_directional_end = matches!(SlideType::from_i32(note.note_type()), Some(SlideType::End))
+        && note
+            .as_slide()
+            .is_some_and(|slide| slide.directional_idx != NO_NOTE);
+    if is_directional_end { 3 } else { 1 }
+}
+
+fn next_slide_path_node(arena: &[NoteData], start_idx: NoteIdx) -> (NoteIdx, Vec<NoteIdx>) {
+    let mut amongs = Vec::new();
+    let mut next_idx = start_idx;
+    loop {
+        let note_type = arena[next_idx].note_type();
+        if matches!(SlideType::from_i32(note_type), Some(SlideType::Relay)) {
+            amongs.push(next_idx);
+        }
+        let Some(slide) = arena[next_idx].as_slide() else {
+            break;
+        };
+        if slide.is_path(note_type) || slide.next_idx == NO_NOTE {
+            break;
+        }
+        next_idx = slide.next_idx;
+    }
+    (next_idx, amongs)
+}
+
+fn slide_path_class(note: &NoteData, arena: &[NoteData]) -> &'static str {
+    let critical = note.is_critical(arena);
+    match (
+        note.as_slide().is_some_and(|slide| slide.decoration),
+        critical,
+    ) {
+        (true, true) => "decoration-critical",
+        (true, false) => "decoration",
+        (false, true) => "slide-critical",
+        (false, false) => "slide",
+    }
+}
+
+fn slide_path_data(lefts: &[BezierPoints], rights: &[BezierPoints]) -> String {
+    let mut path = String::new();
+    for (index, left) in lefts.iter().enumerate() {
+        if index == 0 {
+            write!(path, "M{},{}", round(left[0].0), round(left[0].1)).unwrap();
+        }
+        write!(
+            path,
+            "C{},{},{},{},{},{}",
+            round(left[1].0),
+            round(left[1].1),
+            round(left[2].0),
+            round(left[2].1),
+            round(left[3].0),
+            round(left[3].1),
+        )
+        .unwrap();
+    }
+    for (index, right) in rights.iter().rev().enumerate() {
+        if index == 0 {
+            write!(path, "L{},{}", round(right[3].0), round(right[3].1)).unwrap();
+        }
+        write!(
+            path,
+            "C{},{},{},{},{},{}",
+            round(right[2].0),
+            round(right[2].1),
+            round(right[1].0),
+            round(right[1].1),
+            round(right[0].0),
+            round(right[0].1),
+        )
+        .unwrap();
+    }
+    path.push('z');
+    path
 }
 
 /// Binary search to find x-coordinate on a cubic Bézier curve at a given y

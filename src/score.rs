@@ -145,7 +145,6 @@ impl Score {
 
     /// Multi-pass note linking algorithm matching Python's _init_notes
     pub fn init_notes(&mut self) {
-        // Sort notes by bar position
         self.notes.sort_by(|a, b| {
             a.bar()
                 .partial_cmp(&b.bar())
@@ -155,157 +154,174 @@ impl Score {
         let n = self.notes.len();
         let mut note_deleted = vec![false; n];
         let mut note_indexes: HashMap<Fraction, Vec<usize>> = HashMap::new();
-
-        // Pass 1: Filter invalid notes (outside lanes 2-13), create index
-        for (i, is_deleted) in note_deleted.iter_mut().enumerate() {
-            let lane = self.notes[i].lane();
-            if !(0..12).contains(&(lane - 2)) {
-                *is_deleted = true;
-                let bar = self.notes[i].bar();
-                let note_type = self.notes[i].note_type();
-                let text = if lane == 0 {
-                    "SKILL".to_string()
-                } else if note_type == 1 {
-                    "FEVER CHANCE!".to_string()
-                } else {
-                    "SUPER FEVER!!".to_string()
-                };
-                self.events.push(Event::new(bar).with_text(text));
-                continue;
-            }
-
-            note_indexes.entry(self.notes[i].bar()).or_default().push(i);
-        }
-
-        // Pass 2: Associate Directional notes with Tap notes
-        for i in 0..n {
-            if note_deleted[i] || !self.notes[i].is_directional() {
-                continue;
-            }
-
-            let dir_bar = self.notes[i].bar();
-            let dir_lane = self.notes[i].lane();
-            let dir_width = self.notes[i].width();
-
-            if let Some(indexes) = note_indexes.get(&dir_bar) {
-                for &j in indexes {
-                    if note_deleted[j] || !self.notes[j].is_tap() {
-                        continue;
-                    }
-
-                    let tap = &self.notes[j];
-                    if tap.bar() == dir_bar && tap.lane() == dir_lane && tap.width() == dir_width {
-                        note_deleted[j] = true;
-                        if let NoteData::Directional(_, ref mut d) = self.notes[i] {
-                            d.tap_idx = j;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Pass 3: Associate Tap/Directional with Slide notes + chain slides
-        for i in 0..n {
-            if note_deleted[i] || !self.notes[i].is_slide() {
-                continue;
-            }
-
-            // Set head to self if not set
-            if let NoteData::Slide(_, ref s) = self.notes[i]
-                && s.head_idx == NO_NOTE
-                && let NoteData::Slide(_, ref mut s) = self.notes[i]
-            {
-                s.head_idx = i;
-            }
-
-            let slide_bar = self.notes[i].bar();
-            let slide_lane = self.notes[i].lane();
-            let slide_width = self.notes[i].width();
-
-            // Find matching Tap
-            if let Some(indexes) = note_indexes.get(&slide_bar).cloned() {
-                for j in &indexes {
-                    let j = *j;
-                    if note_deleted[j] || !self.notes[j].is_tap() {
-                        continue;
-                    }
-                    let tap = &self.notes[j];
-                    if tap.bar() == slide_bar
-                        && tap.lane() == slide_lane
-                        && tap.width() == slide_width
-                    {
-                        note_deleted[j] = true;
-                        if let NoteData::Slide(_, ref mut s) = self.notes[i] {
-                            s.tap_idx = j;
-                        }
-                    }
-                }
-
-                // Find matching Directional
-                for j in &indexes {
-                    let j = *j;
-                    if note_deleted[j] || !self.notes[j].is_directional() {
-                        continue;
-                    }
-                    let dir = &self.notes[j];
-                    if dir.bar() == slide_bar
-                        && dir.lane() == slide_lane
-                        && dir.width() == slide_width
-                    {
-                        note_deleted[j] = true;
-                        let dir_tap_idx = self.notes[j]
-                            .as_directional()
-                            .map(|d| d.tap_idx)
-                            .unwrap_or(NO_NOTE);
-                        if let NoteData::Slide(_, ref mut s) = self.notes[i] {
-                            s.directional_idx = j;
-                            if dir_tap_idx != NO_NOTE {
-                                s.tap_idx = dir_tap_idx;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Chain slides: find next slide with same channel and decoration
-            let (slide_type, channel, decoration) = if let NoteData::Slide(_, ref s) = self.notes[i]
-            {
-                (self.notes[i].note_type(), s.channel, s.decoration)
-            } else {
-                continue;
-            };
-
-            if !matches!(SlideType::from_i32(slide_type), Some(SlideType::End)) {
-                let head_idx = if let NoteData::Slide(_, ref s) = self.notes[i] {
-                    s.head_idx
-                } else {
-                    NO_NOTE
-                };
-
-                for (j, &is_deleted_j) in note_deleted.iter().enumerate().skip(i + 1) {
-                    if is_deleted_j || !self.notes[j].is_slide() {
-                        continue;
-                    }
-                    if let NoteData::Slide(_, ref next_s) = self.notes[j]
-                        && next_s.channel == channel
-                        && next_s.decoration == decoration
-                    {
-                        // Set next pointer
-                        if let NoteData::Slide(_, ref mut s) = self.notes[i] {
-                            s.next_idx = j;
-                        }
-                        // Set head pointer on next
-                        if let NoteData::Slide(_, ref mut next_s) = self.notes[j] {
-                            next_s.head_idx = head_idx;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Build active notes list (non-deleted)
+        self.index_valid_notes(&mut note_deleted, &mut note_indexes);
+        self.link_directional_attachments(&mut note_deleted, &note_indexes);
+        self.link_slides(&mut note_deleted, &note_indexes);
         self.active_notes = (0..n).filter(|&i| !note_deleted[i]).collect();
+    }
+
+    fn index_valid_notes(
+        &mut self,
+        note_deleted: &mut [bool],
+        note_indexes: &mut HashMap<Fraction, Vec<usize>>,
+    ) {
+        for (note_idx, is_deleted) in note_deleted.iter_mut().enumerate() {
+            let lane = self.notes[note_idx].lane();
+            if (0..12).contains(&(lane - 2)) {
+                note_indexes
+                    .entry(self.notes[note_idx].bar())
+                    .or_default()
+                    .push(note_idx);
+                continue;
+            }
+            *is_deleted = true;
+            self.events.push(invalid_note_event(&self.notes[note_idx]));
+        }
+    }
+
+    fn link_directional_attachments(
+        &mut self,
+        note_deleted: &mut [bool],
+        note_indexes: &HashMap<Fraction, Vec<usize>>,
+    ) {
+        for note_idx in 0..self.notes.len() {
+            if note_deleted[note_idx] || !self.notes[note_idx].is_directional() {
+                continue;
+            }
+            let indexes = note_indexes
+                .get(&self.notes[note_idx].bar())
+                .cloned()
+                .unwrap_or_default();
+            self.link_directional_taps(note_idx, &indexes, note_deleted);
+        }
+    }
+
+    fn link_directional_taps(
+        &mut self,
+        directional_idx: usize,
+        indexes: &[usize],
+        note_deleted: &mut [bool],
+    ) {
+        for &tap_idx in indexes {
+            if note_deleted[tap_idx] || !self.notes[tap_idx].is_tap() {
+                continue;
+            }
+            if !notes_share_slot(&self.notes[directional_idx], &self.notes[tap_idx]) {
+                continue;
+            }
+            note_deleted[tap_idx] = true;
+            if let Some(directional) = self.notes[directional_idx].as_directional_mut() {
+                directional.tap_idx = tap_idx;
+            }
+        }
+    }
+
+    fn link_slides(
+        &mut self,
+        note_deleted: &mut [bool],
+        note_indexes: &HashMap<Fraction, Vec<usize>>,
+    ) {
+        for slide_idx in 0..self.notes.len() {
+            if note_deleted[slide_idx] || !self.notes[slide_idx].is_slide() {
+                continue;
+            }
+            self.initialize_slide_head(slide_idx);
+            let indexes = note_indexes
+                .get(&self.notes[slide_idx].bar())
+                .cloned()
+                .unwrap_or_default();
+            self.link_slide_taps(slide_idx, &indexes, note_deleted);
+            self.link_slide_directionals(slide_idx, &indexes, note_deleted);
+            self.link_next_slide(slide_idx, note_deleted);
+        }
+    }
+
+    fn initialize_slide_head(&mut self, slide_idx: usize) {
+        if let Some(slide) = self.notes[slide_idx].as_slide_mut()
+            && slide.head_idx == NO_NOTE
+        {
+            slide.head_idx = slide_idx;
+        }
+    }
+
+    fn link_slide_taps(&mut self, slide_idx: usize, indexes: &[usize], note_deleted: &mut [bool]) {
+        for &tap_idx in indexes {
+            if note_deleted[tap_idx] || !self.notes[tap_idx].is_tap() {
+                continue;
+            }
+            if !notes_share_slot(&self.notes[slide_idx], &self.notes[tap_idx]) {
+                continue;
+            }
+            note_deleted[tap_idx] = true;
+            if let Some(slide) = self.notes[slide_idx].as_slide_mut() {
+                slide.tap_idx = tap_idx;
+            }
+        }
+    }
+
+    fn link_slide_directionals(
+        &mut self,
+        slide_idx: usize,
+        indexes: &[usize],
+        note_deleted: &mut [bool],
+    ) {
+        for &directional_idx in indexes {
+            if note_deleted[directional_idx] || !self.notes[directional_idx].is_directional() {
+                continue;
+            }
+            if !notes_share_slot(&self.notes[slide_idx], &self.notes[directional_idx]) {
+                continue;
+            }
+            note_deleted[directional_idx] = true;
+            let tap_idx = self.notes[directional_idx]
+                .as_directional()
+                .map(|directional| directional.tap_idx)
+                .unwrap_or(NO_NOTE);
+            if let Some(slide) = self.notes[slide_idx].as_slide_mut() {
+                slide.directional_idx = directional_idx;
+                if tap_idx != NO_NOTE {
+                    slide.tap_idx = tap_idx;
+                }
+            }
+        }
+    }
+
+    fn link_next_slide(&mut self, slide_idx: usize, note_deleted: &[bool]) {
+        let Some(slide) = self.notes[slide_idx].as_slide() else {
+            return;
+        };
+        if matches!(
+            SlideType::from_i32(self.notes[slide_idx].note_type()),
+            Some(SlideType::End)
+        ) {
+            return;
+        }
+        let (channel, decoration, head_idx) = (slide.channel, slide.decoration, slide.head_idx);
+        let Some(next_idx) = self.find_next_slide(slide_idx, channel, decoration, note_deleted)
+        else {
+            return;
+        };
+        if let Some(slide) = self.notes[slide_idx].as_slide_mut() {
+            slide.next_idx = next_idx;
+        }
+        if let Some(next_slide) = self.notes[next_idx].as_slide_mut() {
+            next_slide.head_idx = head_idx;
+        }
+    }
+
+    fn find_next_slide(
+        &self,
+        slide_idx: usize,
+        channel: i32,
+        decoration: bool,
+        note_deleted: &[bool],
+    ) -> Option<usize> {
+        (slide_idx + 1..self.notes.len()).find(|&next_idx| {
+            !note_deleted[next_idx]
+                && self.notes[next_idx]
+                    .as_slide()
+                    .is_some_and(|slide| slide.channel == channel && slide.decoration == decoration)
+        })
     }
 
     /// Dedup fully-identical consecutive events (matches Python's `_init_events`,
@@ -481,6 +497,21 @@ impl Default for Score {
     fn default() -> Self {
         Score::new()
     }
+}
+
+fn invalid_note_event(note: &NoteData) -> Event {
+    let text = if note.lane() == 0 {
+        "SKILL"
+    } else if note.note_type() == 1 {
+        "FEVER CHANCE!"
+    } else {
+        "SUPER FEVER!!"
+    };
+    Event::new(note.bar()).with_text(text.to_string())
+}
+
+fn notes_share_slot(left: &NoteData, right: &NoteData) -> bool {
+    left.bar() == right.bar() && left.lane() == right.lane() && left.width() == right.width()
 }
 
 fn events_equal(a: &Event, b: &Event) -> bool {

@@ -117,27 +117,7 @@ impl Slide {
             return None;
         }
         if self.decoration {
-            if self.tap_idx != NO_NOTE {
-                let tap_tick = Tap::is_tick_with_type(&Tap, arena[self.tap_idx].note_type());
-                if let Some(true) = tap_tick {
-                    return tap_tick;
-                }
-            }
-            if self.directional_idx != NO_NOTE
-                && let Some(d) = arena[self.directional_idx].as_directional()
-            {
-                let d_tick = d.is_tick(arena);
-                if let Some(true) = d_tick {
-                    return d_tick;
-                }
-            }
-            // Check if either returned a non-None value
-            let tap_is_some = self.tap_idx != NO_NOTE;
-            let dir_is_some = self.directional_idx != NO_NOTE;
-            if tap_is_some || dir_is_some {
-                return Some(false);
-            }
-            return None;
+            return self.decoration_tick(arena);
         }
 
         if matches!(SlideType::from_i32(note_type), Some(SlideType::Invisible)) {
@@ -151,5 +131,27 @@ impl Slide {
         }
 
         Some(true)
+    }
+
+    fn decoration_tick(&self, arena: &[NoteData]) -> Option<bool> {
+        let tap_tick = self.attached_tap_tick(arena);
+        let directional_tick = self.attached_directional_tick(arena);
+        if tap_tick == Some(true) || directional_tick == Some(true) {
+            return Some(true);
+        }
+        (self.tap_idx != NO_NOTE || self.directional_idx != NO_NOTE).then_some(false)
+    }
+
+    fn attached_tap_tick(&self, arena: &[NoteData]) -> Option<bool> {
+        (self.tap_idx != NO_NOTE)
+            .then(|| Tap::is_tick_with_type(&Tap, arena[self.tap_idx].note_type()))
+            .flatten()
+    }
+
+    fn attached_directional_tick(&self, arena: &[NoteData]) -> Option<bool> {
+        (self.directional_idx != NO_NOTE)
+            .then(|| arena[self.directional_idx].as_directional())
+            .flatten()
+            .and_then(|directional| directional.is_tick(arena))
     }
 }

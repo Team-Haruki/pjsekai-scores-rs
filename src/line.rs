@@ -207,7 +207,6 @@ impl Line {
     }
 
     fn parse_score(&self) -> Vec<ParsedItem> {
-        // Event (bar length)
         if let Some(caps) = RE_EVENT.captures(&self.header) {
             let bar: i64 = caps[1].parse().unwrap_or(0);
             let bar_length: i64 = self.data.trim().parse().unwrap_or(4);
@@ -217,7 +216,6 @@ impl Line {
             )];
         }
 
-        // BPM definition
         if let Some(caps) = RE_BPM_DEF.captures(&self.header) {
             let id = base36_two(&caps[1]);
             if let Some(bpm) = Fraction::parse(&self.data) {
@@ -225,128 +223,119 @@ impl Line {
             }
         }
 
-        // BPM reference
         if let Some(caps) = RE_BPM_REF.captures(&self.header) {
             let bar_num: i64 = caps[1].parse().unwrap_or(0);
-            let mut results = Vec::new();
-            for (beat, data) in parse_score_data(&self.data) {
-                let id = base36_two(&data);
-                results.push(ParsedItem::BpmReference(BpmReference {
-                    bar: Fraction::from_integer(bar_num) + beat,
-                    id,
-                }));
-            }
-            return results;
+            return parse_bpm_references(bar_num, &self.data);
         }
 
-        // Speed definition (TIL)
         if let Some(caps) = RE_TIL.captures(&self.header) {
             let id = base36_two(&caps[1]);
-            let data = strip_quotes(&self.data);
-            let mut items = Vec::new();
-            if !data.is_empty() {
-                for item_match in RE_SPEED_ITEM.captures_iter(&data) {
-                    items.push(SpeedDefinitionItem {
-                        bar: item_match[1].parse().unwrap_or(0),
-                        tick: item_match[2].parse().unwrap_or(0),
-                        speed: item_match[3].parse().unwrap_or(1.0),
-                    });
-                }
-            }
-            items.sort_by_key(|a| (a.bar, a.tick));
-            return vec![ParsedItem::SpeedDefinition(SpeedDefinition { id, items })];
+            return vec![ParsedItem::SpeedDefinition(parse_speed_definition(
+                id, &self.data,
+            ))];
         }
 
-        // Tap note
         if let Some(caps) = RE_TAP.captures(&self.header) {
             let bar_num: i64 = caps[1].parse().unwrap_or(0);
             let lane = base36_char(caps[2].chars().next().unwrap_or('0'));
-            let mut results = Vec::new();
-            for (beat, data) in parse_score_data(&self.data) {
-                let chars: Vec<char> = data.chars().collect();
-                let note_type = base36_char(chars[0]);
-                let width = base36_char(chars[1]);
-                results.push(ParsedItem::Note(NoteData::Tap(
-                    NoteBase::new(
-                        Fraction::from_integer(bar_num) + beat,
-                        lane,
-                        width,
-                        note_type,
-                    ),
-                    Tap,
-                )));
-            }
-            return results;
+            return parse_note_items(bar_num, lane, &self.data, ScoreNoteKind::Tap);
         }
 
-        // Slide note
         if let Some(caps) = RE_SLIDE.captures(&self.header) {
             let bar_num: i64 = caps[1].parse().unwrap_or(0);
             let lane = base36_char(caps[2].chars().next().unwrap_or('0'));
             let channel = base36_char(caps[3].chars().next().unwrap_or('0'));
-            let mut results = Vec::new();
-            for (beat, data) in parse_score_data(&self.data) {
-                let chars: Vec<char> = data.chars().collect();
-                let note_type = base36_char(chars[0]);
-                let width = base36_char(chars[1]);
-                results.push(ParsedItem::Note(NoteData::Slide(
-                    NoteBase::new(
-                        Fraction::from_integer(bar_num) + beat,
-                        lane,
-                        width,
-                        note_type,
-                    ),
-                    Slide::new(channel, false),
-                )));
-            }
-            return results;
+            return parse_note_items(
+                bar_num,
+                lane,
+                &self.data,
+                ScoreNoteKind::Slide {
+                    channel,
+                    decoration: false,
+                },
+            );
         }
 
-        // Directional note
         if let Some(caps) = RE_DIRECTIONAL.captures(&self.header) {
             let bar_num: i64 = caps[1].parse().unwrap_or(0);
             let lane = base36_char(caps[2].chars().next().unwrap_or('0'));
-            let mut results = Vec::new();
-            for (beat, data) in parse_score_data(&self.data) {
-                let chars: Vec<char> = data.chars().collect();
-                let note_type = base36_char(chars[0]);
-                let width = base36_char(chars[1]);
-                results.push(ParsedItem::Note(NoteData::Directional(
-                    NoteBase::new(
-                        Fraction::from_integer(bar_num) + beat,
-                        lane,
-                        width,
-                        note_type,
-                    ),
-                    Directional::new(),
-                )));
-            }
-            return results;
+            return parse_note_items(bar_num, lane, &self.data, ScoreNoteKind::Directional);
         }
 
-        // Decorated slide note (channel 9)
         if let Some(caps) = RE_DECO_SLIDE.captures(&self.header) {
             let bar_num: i64 = caps[1].parse().unwrap_or(0);
             let lane = base36_char(caps[2].chars().next().unwrap_or('0'));
             let channel = base36_char(caps[3].chars().next().unwrap_or('0'));
-            let mut results = Vec::new();
-            for (beat, data) in parse_score_data(&self.data) {
-                let chars: Vec<char> = data.chars().collect();
-                let note_type = base36_char(chars[0]);
-                let width = base36_char(chars[1]);
-                results.push(ParsedItem::Note(NoteData::Slide(
-                    NoteBase::new(
-                        Fraction::from_integer(bar_num) + beat,
-                        lane,
-                        width,
-                        note_type,
-                    ),
-                    Slide::new(channel, true),
-                )));
-            }
-            return results;
+            return parse_note_items(
+                bar_num,
+                lane,
+                &self.data,
+                ScoreNoteKind::Slide {
+                    channel,
+                    decoration: true,
+                },
+            );
         }
 
         Vec::new()
     }
+}
+
+#[derive(Clone, Copy)]
+enum ScoreNoteKind {
+    Tap,
+    Slide { channel: i32, decoration: bool },
+    Directional,
+}
+
+fn parse_bpm_references(bar_num: i64, data: &str) -> Vec<ParsedItem> {
+    parse_score_data(data)
+        .into_iter()
+        .map(|(beat, data)| {
+            ParsedItem::BpmReference(BpmReference {
+                bar: Fraction::from_integer(bar_num) + beat,
+                id: base36_two(&data),
+            })
+        })
+        .collect()
+}
+
+fn parse_speed_definition(id: i32, raw_data: &str) -> SpeedDefinition {
+    let data = strip_quotes(raw_data);
+    let mut items = RE_SPEED_ITEM
+        .captures_iter(&data)
+        .map(|item_match| SpeedDefinitionItem {
+            bar: item_match[1].parse().unwrap_or(0),
+            tick: item_match[2].parse().unwrap_or(0),
+            speed: item_match[3].parse().unwrap_or(1.0),
+        })
+        .collect::<Vec<_>>();
+    items.sort_by_key(|item| (item.bar, item.tick));
+    SpeedDefinition { id, items }
+}
+
+fn parse_note_items(bar_num: i64, lane: i32, data: &str, kind: ScoreNoteKind) -> Vec<ParsedItem> {
+    parse_score_data(data)
+        .into_iter()
+        .map(|(beat, data)| {
+            let chars = data.as_bytes();
+            let note_type = base36_char(chars[0] as char);
+            let width = base36_char(chars[1] as char);
+            let base = NoteBase::new(
+                Fraction::from_integer(bar_num) + beat,
+                lane,
+                width,
+                note_type,
+            );
+            let note = match kind {
+                ScoreNoteKind::Tap => NoteData::Tap(base, Tap),
+                ScoreNoteKind::Slide {
+                    channel,
+                    decoration,
+                } => NoteData::Slide(base, Slide::new(channel, decoration)),
+                ScoreNoteKind::Directional => NoteData::Directional(base, Directional::new()),
+            };
+            ParsedItem::Note(note)
+        })
+        .collect()
 }
