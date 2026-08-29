@@ -257,5 +257,46 @@ mod tests {
         let f = Fraction::new(355, 113);
         let limited = f.limit_denominator(10);
         assert_eq!(limited, Fraction::new(22, 7));
+        assert_eq!(
+            Fraction::new(1, 2).limit_denominator(10),
+            Fraction::new(1, 2)
+        );
+        assert_eq!(
+            Fraction::new(3, 2).limit_denominator(1),
+            Fraction::from_integer(1)
+        );
+    }
+
+    #[test]
+    fn test_conversions_rounding_and_scalar_operations() {
+        let value = Fraction::new(-7, 3);
+        assert_eq!(value.numer(), &-7);
+        assert_eq!(value.denom(), &3);
+        assert!((value.to_f64() + 7.0 / 3.0).abs() < f64::EPSILON);
+        assert_eq!(value.floor(), -3);
+        assert_eq!(value.ceil(), -2);
+        assert_eq!(value.trunc(), -2);
+        assert_eq!(value.abs(), Fraction::new(7, 3));
+        assert_eq!(value.inner(), Ratio::new(-7, 3));
+
+        assert_eq!(Fraction::parse(" 3 / 4 "), Some(Fraction::new(3, 4)));
+        assert_eq!(Fraction::parse("42"), Some(Fraction::from_integer(42)));
+        assert_eq!(Fraction::parse("1.25"), Some(Fraction::new(5, 4)));
+        assert_eq!(Fraction::parse("invalid"), None);
+        assert_eq!(Fraction::parse("1/nope"), None);
+        assert_eq!(Fraction::from_f64(f64::NAN), Fraction::zero());
+
+        let half = Fraction::new(1, 2);
+        assert_eq!(Fraction::from(2_i64), Fraction::from_integer(2));
+        assert_eq!(Fraction::from(3_i32), Fraction::from_integer(3));
+        assert_eq!(Fraction::from(0.5_f64), half);
+        assert_eq!(half / Fraction::new(1, 4), Fraction::from_integer(2));
+        assert_eq!(-half, Fraction::new(-1, 2));
+        assert_eq!(half * 4, Fraction::from_integer(2));
+        assert_eq!(half / 2, Fraction::new(1, 4));
+        assert_eq!(half + 1, Fraction::new(3, 2));
+        assert_eq!(half - 1, Fraction::new(-1, 2));
+        assert_eq!(format!("{half:?}"), "1/2");
+        assert_eq!(Fraction::one(), Fraction::from_integer(1));
     }
 }
