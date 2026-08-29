@@ -289,6 +289,7 @@ fn push_slide_attachments(
 }
 
 fn push_rebased_source_events(source: &mut Score, offset: f64, score: &mut Score) {
+    let mut rebased_events = Vec::new();
     for event in source.events.clone() {
         if event.speed.is_none() && event.text.is_none() {
             continue;
@@ -296,6 +297,7 @@ fn push_rebased_source_events(source: &mut Score, offset: f64, score: &mut Score
         let source_time = source.get_time(event.bar).to_f64();
         let mut event = event;
         event.bar = score.get_bar_by_time(source_time - offset);
-        score.events.push(event);
+        rebased_events.push(event);
     }
+    score.events.extend(rebased_events);
 }
