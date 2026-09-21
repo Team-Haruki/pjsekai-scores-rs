@@ -17,9 +17,15 @@ The original Python implementation lives at `../scores/` and is the reference fo
 cargo build --release
 cargo build --release --features skia-image
 cargo check
+cargo check --features python
 cargo check --features 'python skia-image'
 cargo check --target wasm32-unknown-unknown --no-default-features --features wasm --lib
+cargo test
 cargo test --features skia-image
+cargo test <test_name>                        # single test
+cargo clippy -- -D warnings                   # CI requires clean
+cargo fmt --all --check                       # CI requires clean
+cargo fmt                                     # auto-format
 
 # Python wheel (current platform, active venv)
 maturin build --release
@@ -103,6 +109,9 @@ Accessed directly by `rebase.rs` to pre-compute bar→time mappings without borr
 ### Borrow checker in rebase.rs
 `source.active_notes` iteration and `source.get_time()` (mutably populates cache) cannot coexist. Fix: clone `active_notes` and `notes` snapshots first, pre-compute all bar→time values into a `HashMap`, then iterate the snapshot.
 
+### SVG rendering (drawing.rs)
+The SVG output is built directly into a `String` via `std::fmt::Write` — there is no DOM library. CSS themes are embedded at compile time with `include_str!`.
+
 ### Drawing.svg() borrow order
 `self.build_skill_covers(score)` takes `&mut self`. The `let cfg = &self.config` binding must come **after** this mutable call, not before. Violating this causes E0502.
 
@@ -124,6 +133,12 @@ The literal `href="#` contains `"#` which prematurely closes `r#"..."#` raw stri
 
 ### Feature gate
 All PyO3 code is behind `#[cfg(feature = "python")]`. The crate builds as a pure Rust library + CLI without it.
+
+### Thin binding layers
+`python.rs` and `wasm.rs` are glue only — all business logic belongs in the core modules and both surfaces route through `Score`, `Drawing`, `Rebase`, and `Lyric`. When changing rendering arguments, keep `font_paths` / `font_dirs` exposed on `Drawing`, on `score_to_svg/png/jpg/jpeg`, and on the backward-compatible `sus_to_*` helpers.
+
+### `Drawing.raster()`
+The zero-copy service integration API: it renders into a native N32 premultiplied buffer owned by `RasterImage` and exposes a read-only Python buffer view. Use PNG/JPEG instead whenever the output has to cross a process or network boundary.
 
 ### Free-threaded Python (3.13t / 3.14t)
 All `#[pyclass]` types own their data (no `Rc`/`RefCell`) so they are `Send + Sync` automatically. PyO3 0.29 supports free-threaded Python natively.
@@ -164,7 +179,7 @@ The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build
 - A GitHub Release/tag triggers three release workflows: Crate, CLI, and Python. Check all three, especially the `pjsekai-scores-rs-skia-image` Python publish job.
 - For Skia/font/API changes, run `cargo check --features 'python skia-image'` and `cargo test --features skia-image` before release.
 - For `RasterImage` changes, also build the Skia Python wheel and verify `memoryview(raster).readonly` plus the downstream zero-copy consumer path.
-- When changing CLI/Python options, update `README.md`, `AGENTS.md`, and `CLAUDE.md` in the same docs pass.
+- When changing CLI/Python options, update `README.md` and `AGENTS.md` in the same docs pass.
 
 ---
 
