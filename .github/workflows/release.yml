@@ -1,98 +1,117 @@
 name: Release
+# Replaces release.yml + release-crate.yml + release-python.yml: one tag, one run.
+# PyPI trusted publishing is bound to the workflow FILE: before the first tag, add a trusted
+# publisher for workflow release.yml (environment pypi) on pjsekai-scores-rs and pjsekai-scores-rs-skia-image; the current one
+# names release-python.yml, so the first upload would fail with invalid-publisher.
 
 on:
   push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
+    tags: ['v*']
+  workflow_dispatch: # dry run: builds everything, publishes nothing
+
+permissions:
+  contents: read
 
 concurrency:
-  group: release-${{ github.ref_name }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  CARGO_TERM_COLOR: always
-  BINARY_NAME: pjsekai-scores-rs
-
 jobs:
-  build:
-    name: Build ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+  gate:
+    name: Gate
     permissions:
       contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            name: linux-x64
-            archive: tar.gz
-          - os: macos-latest
-            name: macos-arm64
-            archive: tar.gz
-          - os: windows-latest
-            name: windows-x64
-            archive: zip
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
+      checks: read
+    uses: seiunx-dev/ci-templates/.github/workflows/release-gate.yml@v1
+    with:
+      version-source: cargo
+      version-extra-paths: pyproject.toml
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+  binaries:
+    name: Binaries
+    needs: gate
+    uses: seiunx-dev/ci-templates/.github/workflows/rust-release.yml@v1
+    with:
+      version: ${{ needs.gate.outputs.version }}
+      tag: ${{ needs.gate.outputs.tag }}
+      asset-name: "{name}-{label}"
+      layout: flat
 
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-
-      - name: Build release binary
-        run: cargo build --release --locked
-
-      - name: Package archive (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p dist
-          cp "target/release/${{ env.BINARY_NAME }}" "dist/${{ env.BINARY_NAME }}"
-          tar -czf "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.tar.gz" -C dist "${{ env.BINARY_NAME }}"
-
-      - name: Package archive (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "target/release/${{ env.BINARY_NAME }}.exe" "dist/${{ env.BINARY_NAME }}.exe"
-          Compress-Archive -Path "dist/${{ env.BINARY_NAME }}.exe" -DestinationPath "dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.zip" -Force
-
-      - name: Upload packaged artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ env.BINARY_NAME }}-${{ matrix.name }}
-          path: dist/${{ env.BINARY_NAME }}-${{ matrix.name }}.${{ matrix.archive }}
-          if-no-files-found: error
+  wheels:
+    name: Wheels
+    needs: gate
+    uses: seiunx-dev/ci-templates/.github/workflows/maturin-wheels.yml@v1
+    with:
+      version: ${{ needs.gate.outputs.version }}
+      variants: '["default", "skia-image"]'
+      configure-command: |
+        case "$WHEEL_VARIANT" in
+          skia-image) export PYTHON_PACKAGE_NAME=pjsekai-scores-rs-skia-image MATURIN_FEATURES_TOML='["python", "skia-image"]' ;;
+          *)          export PYTHON_PACKAGE_NAME=pjsekai-scores-rs MATURIN_FEATURES_TOML='["python"]' ;;
+        esac
+        bash .github/scripts/configure-python-package.sh
+      before-script-linux: 'if [ "{variant}" = skia-image ]; then bash .github/scripts/install-skia-linux-deps.sh {target}; fi'
+      # Same wheel set as release-python.yml: --find-interpreter everywhere (cp39-cp314 + 3.14t
+      # where the runner/container has it), plus a manylinux_2_28 leg for x86_64 3.14t.
+      interpreters: find
+      setup-python-versions: "3.9 3.10 3.11 3.12 3.13 3.14 3.14t"
+      targets: >-
+        [{"label":"linux-x64","os":"ubuntu-latest","target":"x86_64"},
+         {"label":"linux-x64-ft","os":"ubuntu-latest","target":"x86_64","manylinux":"2_28","interpreters":"3.14t","test":false},
+         {"label":"linux-arm64","os":"ubuntu-latest","target":"aarch64","test":false},
+         {"label":"macos-arm64","os":"macos-15","target":"aarch64-apple-darwin"},
+         {"label":"macos-x64","os":"macos-15","target":"x86_64-apple-darwin","test":false},
+         {"label":"windows-x64","os":"windows-latest","target":"x64"}]
+      smoke-import: pjsekai_scores_rs
 
   publish:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    name: GitHub Release
+    needs: [gate, binaries, wheels]
+    if: needs.gate.outputs.is-tag == 'true'
     permissions:
       contents: write
+    uses: seiunx-dev/ci-templates/.github/workflows/gh-release.yml@v1
+    with:
+      tag: ${{ needs.gate.outputs.tag }}
+      prerelease: ${{ needs.gate.outputs.prerelease }}
+
+  pypi:
+    name: PyPI
+    needs: [gate, wheels, publish]
+    if: needs.gate.outputs.is-tag == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Trusted publishing must run in this (caller) workflow, not in a reusable one.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pjsekai-scores-rs
+    permissions:
+      id-token: write
     steps:
-      - name: Download packaged artifacts
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: artifacts
-
-      - name: Generate checksums
-        run: |
-          cd artifacts
-          find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec sha256sum {} \; > "SHA256SUMS-${{ github.ref_name }}.txt"
-
-      - name: Upload release assets
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
-          files: |
-            artifacts/**/*.tar.gz
-            artifacts/**/*.zip
-            artifacts/SHA256SUMS-${{ github.ref_name }}.txt
-          generate_release_notes: true
+          skip-existing: true
+
+  crates:
+    name: crates.io
+    needs: [gate, publish]
+    if: needs.gate.outputs.is-tag == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: seiunx-dev/ci-templates/actions/setup-rust@v1
+        with:
+          cache: "false"
+      - uses: seiunx-dev/ci-templates/actions/cargo-publish@v1
+        with:
+          packages: pjsekai-scores-rs
+          token: ${{ secrets.CARGO_REGISTRY_TOKEN }}

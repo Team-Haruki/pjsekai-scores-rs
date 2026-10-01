@@ -1,31 +1,47 @@
 version: 2
 updates:
-  - package-ecosystem: "cargo"
+  - package-ecosystem: cargo
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: weekly
+      day: tuesday
       time: "09:00"
-      timezone: "Asia/Shanghai"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "[Chore] "
-
-  - package-ecosystem: "uv"
+    cooldown:
+      default-days: 3
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: pip
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: weekly
+      day: tuesday
       time: "09:00"
-      timezone: "Asia/Shanghai"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "[Chore] "
-
-  - package-ecosystem: "github-actions"
+    cooldown:
+      default-days: 3
+    groups:
+      pip-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
+      interval: weekly
+      day: tuesday
       time: "09:00"
-      timezone: "Asia/Shanghai"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "[Chore] "
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        patterns: ["*"]
