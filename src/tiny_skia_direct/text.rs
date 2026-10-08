@@ -13,19 +13,29 @@
 //! - glyph coverage goes through Skia's A8 mask pre-blend (sRGB gamma, contrast
 //!   0.5, keyed on the text colour's luminance in 3 bits), which makes light text
 //!   on dark backgrounds heavier and dark text on light backgrounds lighter;
-//! - fake bold grows the outline by Skia's `SkScalerContext` fake-bold amount,
-//!   `size * lerp(1/24, 1/32)` between 9 and 36 px, offsetting points along the
-//!   corner bisectors (FreeType's `FT_Outline_EmboldenXY`, kept centred).
+//! - glyphs are rasterized once per strike (typeface, size, fake bold, 2x2
+//!   matrix) and subpixel position into A8 masks that are cached process-wide,
+//!   like Skia's strike cache, and blitted one glyph at a time;
+//! - regular glyphs are rasterized like FreeType's `ftgrays` (26.6 points, its
+//!   curve flattening and coverage rounding);
+//! - fake bold is Skia's `SkScalerContext` stroke-and-fill (`useStrokeForFakeBold`):
+//!   the outline is stroked with a miter join at `size * lerp(1/24, 1/32)`
+//!   between 9 and 36 px and the mask is drawn from that path by Skia's analytic
+//!   AA (see `aaa`).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use skrifa::instance::{LocationRef, Size};
 use skrifa::outline::{DrawSettings, HintingInstance, HintingOptions, OutlinePen};
 use skrifa::raw::{FileRef, TableProvider};
 use skrifa::string::StringId;
 use skrifa::{FontRef, GlyphId, MetadataProvider};
-use tiny_skia::{Path, PathBuilder, Transform};
+use tiny_skia::{LineCap, LineJoin, Path, PathBuilder, PathSegment, Stroke, Transform};
+
+use super::aaa;
+use super::raster::{Quantize, Rasterizer};
 
 pub(super) type Unichar = i32;
 
@@ -149,6 +159,8 @@ impl FontStyle {
 }
 
 struct TypefaceData {
+    /// Process-unique id, the strike cache key.
+    id: u64,
     data: Arc<Vec<u8>>,
     index: u32,
     style: FontStyle,
@@ -199,7 +211,9 @@ impl Typeface {
             .or_else(|| english(StringId::FAMILY_NAME))
             .unwrap_or_default();
         let post_script_name = english(StringId::POSTSCRIPT_NAME);
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         Some(Self(Arc::new(TypefaceData {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             data,
             index,
             style,
@@ -254,12 +268,65 @@ pub(super) fn load_typefaces_from_data(bytes: Vec<u8>) -> Vec<Typeface> {
         .collect()
 }
 
+/// A rendered glyph: 8-bit coverage (before the gamma pre-blend) with its
+/// top-left corner relative to the glyph's integral device origin.
+pub(super) struct GlyphMask {
+    pub(super) left: i32,
+    pub(super) top: i32,
+    pub(super) width: usize,
+    pub(super) height: usize,
+    pub(super) coverage: Vec<u8>,
+}
+
+/// A glyph mask placed on the device: its origin is `(x, y)` in whole pixels.
+pub(super) struct PlacedGlyph {
+    pub(super) mask: Arc<GlyphMask>,
+    pub(super) x: i64,
+    pub(super) y: i64,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct StrikeKey {
+    typeface: u64,
+    size_bits: u32,
+    embolden: bool,
+}
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct MaskKey {
+    glyph: u32,
+    /// The 2x2 part of the device matrix.
+    matrix: [u32; 4],
+    /// Subpixel position in quarter pixels.
+    sub_x: u8,
+    sub_y: u8,
+}
+
+/// Process-wide glyph cache for one typeface, size and fake-bold setting.
 #[derive(Default)]
-struct GlyphCache {
+struct Strike {
     hinting: Option<Option<HintingInstance>>,
-    /// Outline in glyph space (y down, origin on the baseline), `None` if empty.
-    outlines: HashMap<u32, Option<Path>>,
+    /// Outlines in glyph space (y down, origin on the baseline), `None` if
+    /// empty, keyed by glyph and whether they are hinted.
+    outlines: HashMap<(u32, bool), Option<Path>>,
     advances: HashMap<u32, f32>,
+    masks: HashMap<MaskKey, Option<Arc<GlyphMask>>>,
+}
+
+/// Strikes beyond this are dropped (all at once), like `CUSTOM_FONT_CACHE`.
+const MAX_STRIKES: usize = 64;
+/// Masks per strike beyond this are dropped (all at once).
+const MAX_MASKS_PER_STRIKE: usize = 4096;
+
+static STRIKES: LazyLock<Mutex<HashMap<StrikeKey, Arc<Mutex<Strike>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn strike(key: StrikeKey) -> Arc<Mutex<Strike>> {
+    let mut strikes = STRIKES.lock().expect("strike cache lock poisoned");
+    if !strikes.contains_key(&key) && strikes.len() >= MAX_STRIKES {
+        strikes.clear();
+    }
+    Arc::clone(strikes.entry(key).or_default())
 }
 
 /// A typeface at a size, with Skia's fake-bold flag (`SkFont`).
@@ -268,7 +335,6 @@ pub(super) struct Font {
     typeface: Option<Typeface>,
     size: f32,
     embolden: bool,
-    cache: Arc<Mutex<GlyphCache>>,
 }
 
 impl Default for Font {
@@ -277,7 +343,6 @@ impl Default for Font {
             typeface: None,
             size: 12.0,
             embolden: false,
-            cache: Arc::default(),
         }
     }
 }
@@ -293,7 +358,6 @@ impl Font {
 
     pub(super) fn set_size(&mut self, size: f32) {
         self.size = size;
-        self.cache = Arc::default();
     }
 
     /// Positions are always subpixel; kept for parity with the Skia backend.
@@ -301,7 +365,14 @@ impl Font {
 
     pub(super) fn set_embolden(&mut self, embolden: bool) {
         self.embolden = embolden;
-        self.cache = Arc::default();
+    }
+
+    fn strike(&self, typeface: &Typeface) -> Arc<Mutex<Strike>> {
+        strike(StrikeKey {
+            typeface: typeface.0.id,
+            size_bits: self.size.to_bits(),
+            embolden: self.embolden,
+        })
     }
 
     fn glyph_ids(&self, font: &FontRef<'_>, text: &str) -> Vec<u32> {
@@ -320,15 +391,16 @@ impl Font {
             return 0.0;
         };
         let glyphs = self.glyph_ids(&font, text);
-        let mut cache = self.cache.lock().expect("glyph cache lock poisoned");
+        let strike = self.strike(typeface);
+        let mut strike = strike.lock().expect("strike lock poisoned");
         glyphs
             .iter()
-            .map(|&gid| self.advance(&font, &mut cache, gid))
+            .map(|&gid| self.advance(&font, &mut strike, gid))
             .sum()
     }
 
-    fn advance(&self, font: &FontRef<'_>, cache: &mut GlyphCache, gid: u32) -> f32 {
-        *cache.advances.entry(gid).or_insert_with(|| {
+    fn advance(&self, font: &FontRef<'_>, strike: &mut Strike, gid: u32) -> f32 {
+        *strike.advances.entry(gid).or_insert_with(|| {
             font.glyph_metrics(Size::new(self.size), LocationRef::default())
                 .advance_width(GlyphId::new(gid))
                 .unwrap_or(0.0)
@@ -336,62 +408,147 @@ impl Font {
         })
     }
 
-    /// Device-space outline of `text` drawn with its baseline origin at `origin`
-    /// in local space, under `transform` (`SkCanvas::drawString`).
-    pub(super) fn text_path(
+    /// The glyph masks of `text` drawn with its baseline origin at `origin` in
+    /// local space, under `transform` (`SkCanvas::drawString`).
+    pub(super) fn glyphs(
         &self,
         text: &str,
         origin: (f32, f32),
         transform: Transform,
-    ) -> Option<Path> {
-        let typeface = self.typeface.as_ref()?;
-        let font = typeface.font_ref()?;
+    ) -> Vec<PlacedGlyph> {
+        let Some(typeface) = self.typeface.as_ref() else {
+            return Vec::new();
+        };
+        let Some(font) = typeface.font_ref() else {
+            return Vec::new();
+        };
         let glyphs = self.glyph_ids(&font, text);
-        let mut cache = self.cache.lock().expect("glyph cache lock poisoned");
-        let mut builder = PathBuilder::new();
+        let strike = self.strike(typeface);
+        let mut strike = strike.lock().expect("strike lock poisoned");
+        let matrix = [transform.sx, transform.ky, transform.kx, transform.sy];
+        let mut placed = Vec::with_capacity(glyphs.len());
         let mut pen_x = origin.0;
         for gid in glyphs {
-            let advance = self.advance(&font, &mut cache, gid);
-            if let Some(outline) = self.outline(&font, &mut cache, gid) {
-                let mut glyph_origin = tiny_skia::Point::from_xy(pen_x, origin.1);
-                transform.map_point(&mut glyph_origin);
-                let (x, y) = snap_glyph_origin(&transform, glyph_origin.x, glyph_origin.y);
-                let glyph_ts = Transform::from_row(
-                    transform.sx,
-                    transform.ky,
-                    transform.kx,
-                    transform.sy,
-                    x,
-                    y,
-                );
-                if let Some(path) = outline.clone().transform(glyph_ts) {
-                    builder.push_path(&path);
-                }
-            }
+            let advance = self.advance(&font, &mut strike, gid);
+            let mut glyph_origin = tiny_skia::Point::from_xy(pen_x, origin.1);
+            transform.map_point(&mut glyph_origin);
             pen_x += advance;
+            let (x, y) = snap_glyph_origin(&transform, glyph_origin.x, glyph_origin.y);
+            let (x_floor, y_floor) = (x.floor(), y.floor());
+            let key = MaskKey {
+                glyph: gid,
+                matrix: matrix.map(f32::to_bits),
+                sub_x: ((x - x_floor) * 4.0) as u8,
+                sub_y: ((y - y_floor) * 4.0) as u8,
+            };
+            if strike.masks.len() >= MAX_MASKS_PER_STRIKE && !strike.masks.contains_key(&key) {
+                strike.masks.clear();
+            }
+            let mask = match strike.masks.get(&key) {
+                Some(mask) => mask.clone(),
+                None => {
+                    // Skia turns hinting off unless the text is axis-aligned
+                    // (`SkTypeface_FreeType::onFilterRec`; 90-degree turns count).
+                    let hinted = (transform.kx == 0.0 && transform.ky == 0.0)
+                        || (transform.sx == 0.0 && transform.sy == 0.0);
+                    let mask = self
+                        .outline(&font, &mut strike, gid, hinted)
+                        .cloned()
+                        .and_then(|outline| {
+                            self.render_mask(&outline, matrix, (x - x_floor, y - y_floor))
+                        })
+                        .map(Arc::new);
+                    strike.masks.insert(key, mask.clone());
+                    mask
+                }
+            };
+            if let Some(mask) = mask {
+                placed.push(PlacedGlyph {
+                    mask,
+                    x: x_floor as i64,
+                    y: y_floor as i64,
+                });
+            }
         }
-        builder.finish()
+        placed
+    }
+
+    /// Rasterizes one glyph at a subpixel offset, the way Skia's FreeType
+    /// scaler context does: FreeType's rasterizer for regular glyphs, Skia's own
+    /// analytic AA for the stroked fake-bold path.
+    fn render_mask(&self, outline: &Path, matrix: [f32; 4], sub: (f32, f32)) -> Option<GlyphMask> {
+        let ts = Transform::from_row(matrix[0], matrix[1], matrix[2], matrix[3], sub.0, sub.1);
+        let (device, freetype) = if self.embolden {
+            (
+                fake_bold(outline, fake_bold_extra(self.size))?.transform(ts)?,
+                false,
+            )
+        } else {
+            (outline.clone().transform(ts)?, true)
+        };
+        let bounds = device.bounds();
+        let left = bounds.left().floor();
+        let top = bounds.top().floor();
+        let right = bounds.right().ceil();
+        let bottom = bounds.bottom().ceil();
+        let (width, height) = ((right - left) as usize, (bottom - top) as usize);
+        if width == 0 || height == 0 || width > 4096 || height > 4096 {
+            return None;
+        }
+        let mut raster = Rasterizer::new(width, height);
+        let quantize = if freetype {
+            raster.add_path_freetype(&device, (left, top));
+            Quantize::FreeType
+        } else {
+            // Skia draws the path into the mask with the mask's corner at 0, 0.
+            let device = device.transform(Transform::from_translate(-left, -top))?;
+            let clip = aaa::ClipRect {
+                left: 0.0,
+                top: 0.0,
+                right: right - left,
+                bottom: bottom - top,
+            };
+            aaa::add_path(&mut raster, &device, clip, (0, 0));
+            Quantize::Round255
+        };
+        let mut coverage = vec![0_u8; width * height];
+        for row in raster.rows() {
+            raster.take_row(row, &mut coverage[row * width..][..width], quantize);
+        }
+        Some(GlyphMask {
+            left: left as i32,
+            top: top as i32,
+            width,
+            height,
+            coverage,
+        })
     }
 
     fn outline<'c>(
         &self,
         font: &FontRef<'_>,
-        cache: &'c mut GlyphCache,
+        strike: &'c mut Strike,
         gid: u32,
+        hinted: bool,
     ) -> Option<&'c Path> {
-        if !cache.outlines.contains_key(&gid) {
-            let outline = self.build_outline(font, cache, gid);
-            cache.outlines.insert(gid, outline);
+        if !strike.outlines.contains_key(&(gid, hinted)) {
+            let outline = self.build_outline(font, strike, hinted);
+            let outline = outline(gid);
+            strike.outlines.insert((gid, hinted), outline);
         }
-        cache.outlines.get(&gid)?.as_ref()
+        strike.outlines.get(&(gid, hinted))?.as_ref()
     }
 
-    fn build_outline(&self, font: &FontRef<'_>, cache: &mut GlyphCache, gid: u32) -> Option<Path> {
-        let outlines = font.outline_glyphs();
-        let glyph = outlines.get(GlyphId::new(gid))?;
+    fn build_outline<'f>(
+        &self,
+        font: &'f FontRef<'_>,
+        strike: &'f mut Strike,
+        hinted: bool,
+    ) -> impl FnOnce(u32) -> Option<Path> + 'f {
         let size = Size::new(self.size);
-        if cache.hinting.is_none() {
-            cache.hinting = Some(if hinting_enabled() {
+        let outlines = font.outline_glyphs();
+        if strike.hinting.is_none() {
+            strike.hinting = Some(if hinting_enabled() {
                 HintingInstance::new(
                     &outlines,
                     size,
@@ -403,29 +560,159 @@ impl Font {
                 None
             });
         }
-        let mut pen = ContourPen::default();
-        let drawn = match cache.hinting.as_ref().and_then(Option::as_ref) {
-            Some(instance) => glyph.draw(DrawSettings::hinted(instance, false), &mut pen),
-            None => glyph.draw(
-                DrawSettings::unhinted(size, LocationRef::default()),
-                &mut pen,
-            ),
-        };
-        if drawn.is_err() {
-            pen = ContourPen::default();
-            glyph
-                .draw(
+        let hinting = strike
+            .hinting
+            .as_ref()
+            .and_then(Option::as_ref)
+            .filter(|_| hinted);
+        move |gid| {
+            let glyph = outlines.get(GlyphId::new(gid))?;
+            let mut pen = ContourPen::default();
+            let drawn = match hinting {
+                Some(instance) => glyph.draw(DrawSettings::hinted(instance, false), &mut pen),
+                None => glyph.draw(
                     DrawSettings::unhinted(size, LocationRef::default()),
                     &mut pen,
-                )
-                .ok()?;
+                ),
+            };
+            if drawn.is_err() {
+                pen = ContourPen::default();
+                glyph
+                    .draw(
+                        DrawSettings::unhinted(size, LocationRef::default()),
+                        &mut pen,
+                    )
+                    .ok()?;
+            }
+            pen.finish_contour();
+            pen.to_path()
         }
-        pen.finish_contour();
-        if self.embolden {
-            embolden(&mut pen.contours, fake_bold_extra(self.size) / 2.0);
-        }
-        pen.to_path()
     }
+}
+
+/// Skia's stroke-and-fill fake bold (`SkStroke` with `fDoFill`): the outline
+/// stroked with a miter join, plus the outline itself oriented like the
+/// stroker's outer contours so the two add up under non-zero winding.
+fn fake_bold(outline: &Path, extra: f32) -> Option<Path> {
+    let stroke = Stroke {
+        width: extra,
+        miter_limit: 4.0,
+        line_cap: LineCap::Butt,
+        line_join: LineJoin::Miter,
+        dash: None,
+    };
+    let stroked = outline.stroke(&stroke, 1.0)?;
+    let mut builder = PathBuilder::new();
+    // `SkPathPriv::ComputeFirstDirection(src) == kCCW` -> reverse the fill copy.
+    if first_direction_is_ccw(outline) {
+        push_reversed(&mut builder, outline);
+    } else {
+        builder.push_path(outline);
+    }
+    builder.push_path(&stroked);
+    builder.finish()
+}
+
+/// Orientation of the contour holding the path's lowest point (largest y),
+/// as Skia's `ComputeFirstDirection` decides it (y down: CCW on screen when
+/// the cross product around that point is negative).
+fn first_direction_is_ccw(path: &Path) -> bool {
+    let mut best: Option<(f32, f64)> = None;
+    for contour in contours(path) {
+        let Some(max_y) = contour.iter().map(|p| p.y).reduce(f32::max) else {
+            continue;
+        };
+        let mut area = 0.0_f64;
+        for (i, p) in contour.iter().enumerate() {
+            let q = contour[(i + 1) % contour.len()];
+            area += f64::from(p.x) * f64::from(q.y) - f64::from(q.x) * f64::from(p.y);
+        }
+        if best.is_none_or(|(y, _)| max_y > y) {
+            best = Some((max_y, area));
+        }
+    }
+    best.is_some_and(|(_, area)| area < 0.0)
+}
+
+/// The on- and off-curve points of each contour.
+fn contours(path: &Path) -> Vec<Vec<tiny_skia::Point>> {
+    let mut out: Vec<Vec<tiny_skia::Point>> = Vec::new();
+    for segment in path.segments() {
+        match segment {
+            PathSegment::MoveTo(p) => out.push(vec![p]),
+            PathSegment::LineTo(p) => out.last_mut().into_iter().for_each(|c| c.push(p)),
+            PathSegment::QuadTo(p1, p2) => {
+                out.last_mut().into_iter().for_each(|c| c.extend([p1, p2]))
+            }
+            PathSegment::CubicTo(p1, p2, p3) => out
+                .last_mut()
+                .into_iter()
+                .for_each(|c| c.extend([p1, p2, p3])),
+            PathSegment::Close => {}
+        }
+    }
+    out
+}
+
+/// Appends every contour of `path` with its direction reversed.
+fn push_reversed(builder: &mut PathBuilder, path: &Path) {
+    enum Seg {
+        Line(tiny_skia::Point),
+        Quad(tiny_skia::Point, tiny_skia::Point),
+        Cubic(tiny_skia::Point, tiny_skia::Point, tiny_skia::Point),
+    }
+    let mut flush = |start: tiny_skia::Point, segs: &mut Vec<(tiny_skia::Point, Seg)>| {
+        if segs.is_empty() {
+            return;
+        }
+        let end = match segs.last() {
+            Some((_, Seg::Line(p)))
+            | Some((_, Seg::Quad(_, p)))
+            | Some((_, Seg::Cubic(_, _, p))) => *p,
+            None => start,
+        };
+        builder.move_to(end.x, end.y);
+        for (from, seg) in segs.drain(..).rev() {
+            match seg {
+                Seg::Line(_) => builder.line_to(from.x, from.y),
+                Seg::Quad(c, _) => builder.quad_to(c.x, c.y, from.x, from.y),
+                Seg::Cubic(c1, c2, _) => builder.cubic_to(c2.x, c2.y, c1.x, c1.y, from.x, from.y),
+            }
+        }
+        builder.close();
+    };
+    let mut start = tiny_skia::Point::zero();
+    let mut last = start;
+    let mut segs: Vec<(tiny_skia::Point, Seg)> = Vec::new();
+    for segment in path.segments() {
+        match segment {
+            PathSegment::MoveTo(p) => {
+                flush(start, &mut segs);
+                start = p;
+                last = p;
+            }
+            PathSegment::LineTo(p) => {
+                segs.push((last, Seg::Line(p)));
+                last = p;
+            }
+            PathSegment::QuadTo(c, p) => {
+                segs.push((last, Seg::Quad(c, p)));
+                last = p;
+            }
+            PathSegment::CubicTo(c1, c2, p) => {
+                segs.push((last, Seg::Cubic(c1, c2, p)));
+                last = p;
+            }
+            PathSegment::Close => {
+                if last != start {
+                    segs.push((last, Seg::Line(start)));
+                }
+                flush(start, &mut segs);
+                last = start;
+            }
+        }
+    }
+    flush(start, &mut segs);
 }
 
 /// Skia's `SkScalerContext` fake-bold outset: the outline grows by
@@ -557,123 +844,10 @@ impl OutlinePen for ContourPen {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Orientation {
-    TrueType,
-    PostScript,
-}
-
-/// `FT_Outline_Get_Orientation` over all contours (y up).
-fn orientation(contours: &[Contour]) -> Option<Orientation> {
-    let mut area = 0.0_f64;
-    for contour in contours {
-        let Some(&last) = contour.points.last() else {
-            continue;
-        };
-        let mut prev = last;
-        for &cur in &contour.points {
-            area += f64::from(cur.1 - prev.1) * f64::from(cur.0 + prev.0);
-            prev = cur;
-        }
-    }
-    if area > 0.0 {
-        Some(Orientation::PostScript)
-    } else if area < 0.0 {
-        Some(Orientation::TrueType)
-    } else {
-        None
-    }
-}
-
-/// `FT_Outline_EmboldenXY` with `strength` already halved, minus FreeType's
-/// up-right translation so the glyph grows symmetrically like Skia's stroke-and-fill.
-fn embolden(contours: &mut [Contour], strength: f32) {
-    if strength <= 0.0 {
-        return;
-    }
-    let Some(orientation) = orientation(contours) else {
-        return;
-    };
-    for contour in contours {
-        let points = &mut contour.points;
-        let n = points.len();
-        if n < 2 {
-            continue;
-        }
-        let last = n - 1;
-        let next = |j: usize| if j < last { j + 1 } else { 0 };
-
-        let mut l_in = 0.0_f32;
-        let mut v_in = (0.0_f32, 0.0_f32);
-        let mut anchor = (0.0_f32, 0.0_f32);
-        let mut l_anchor = 0.0_f32;
-        let mut k: Option<usize> = None;
-        let mut i = last;
-        let mut j = 0;
-        // Counter j cycles through the points; i advances only when points move;
-        // anchor k marks the first moved point.
-        while j != i && Some(i) != k {
-            let (v_out, l_out);
-            if Some(j) != k {
-                let dx = points[j].0 - points[i].0;
-                let dy = points[j].1 - points[i].1;
-                let len = (dx * dx + dy * dy).sqrt();
-                if len == 0.0 {
-                    j = next(j);
-                    continue;
-                }
-                v_out = (dx / len, dy / len);
-                l_out = len;
-            } else {
-                v_out = anchor;
-                l_out = l_anchor;
-            }
-
-            if l_in != 0.0 {
-                if k.is_none() {
-                    k = Some(i);
-                    anchor = v_in;
-                    l_anchor = l_in;
-                }
-                let mut d = v_in.0 * v_out.0 + v_in.1 * v_out.1;
-                let shift = if d > -0.9375 {
-                    d += 1.0;
-                    let mut shift = (v_in.1 + v_out.1, v_in.0 + v_out.0);
-                    let mut q = v_out.0 * v_in.1 - v_out.1 * v_in.0;
-                    if orientation == Orientation::TrueType {
-                        shift.0 = -shift.0;
-                        q = -q;
-                    } else {
-                        shift.1 = -shift.1;
-                    }
-                    let l = l_in.min(l_out);
-                    let scale = if strength * q <= l * d {
-                        strength / d
-                    } else {
-                        l / q
-                    };
-                    (shift.0 * scale, shift.1 * scale)
-                } else {
-                    (0.0, 0.0)
-                };
-                while i != j {
-                    points[i].0 += shift.0;
-                    points[i].1 += shift.1;
-                    i = next(i);
-                }
-            } else {
-                i = j;
-            }
-            v_in = v_out;
-            l_in = l_out;
-            j = next(j);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Contour, Verb, embolden, fake_bold_extra, glyph_coverage_lut};
+    use super::{fake_bold, fake_bold_extra, glyph_coverage_lut};
+    use tiny_skia::PathBuilder;
 
     #[test]
     fn fake_bold_matches_skia_interpolation() {
@@ -696,23 +870,36 @@ mod tests {
     }
 
     #[test]
-    fn embolden_grows_a_square_symmetrically() {
-        // Counter-clockwise (PostScript) unit square scaled to 10 px, y up.
-        let mut contours = vec![Contour {
-            points: vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
-            verbs: vec![Verb::Line, Verb::Line, Verb::Line],
-        }];
-        embolden(&mut contours, 1.0);
-        let expected = [(-1.0, -1.0), (11.0, -1.0), (11.0, 11.0), (-1.0, 11.0)];
-        for (point, expected) in contours[0].points.iter().zip(expected) {
-            assert!(
-                (point.0 - expected.0).abs() < 1e-4,
-                "{point:?} vs {expected:?}"
+    fn fake_bold_grows_both_orientations_by_half_the_stroke() {
+        for reversed in [false, true] {
+            let mut b = PathBuilder::new();
+            let corners = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+            let order: Vec<_> = if reversed {
+                corners.iter().rev().collect()
+            } else {
+                corners.iter().collect()
+            };
+            b.move_to(order[0].0, order[0].1);
+            for p in &order[1..] {
+                b.line_to(p.0, p.1);
+            }
+            b.close();
+            let bold = fake_bold(&b.finish().unwrap(), 2.0).unwrap();
+            let bounds = bold.bounds();
+            assert_eq!(
+                (bounds.left(), bounds.top(), bounds.right(), bounds.bottom()),
+                (-1.0, -1.0, 11.0, 11.0)
             );
-            assert!(
-                (point.1 - expected.1).abs() < 1e-4,
-                "{point:?} vs {expected:?}"
-            );
+            // The centre stays filled: the fill copy winds like the stroke.
+            let mut r = super::Rasterizer::new(12, 12);
+            r.add_path(&bold, tiny_skia::Transform::from_translate(1.0, 1.0));
+            let mut row = vec![0; 12];
+            for y in 0..12 {
+                r.take_row(y, &mut row, super::Quantize::Round255);
+                if y == 6 {
+                    assert!(row.iter().all(|&c| c == 255), "{row:?}");
+                }
+            }
         }
     }
 }

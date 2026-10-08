@@ -2,15 +2,20 @@
 //!
 //! It provides exactly the canvas surface `tiny_skia_direct` needs (save/restore,
 //! transforms, rect clips, rects, lines, round rects, paths, image rects and
-//! device-space text paths) and keeps Skia's semantics where tiny-skia differs:
+//! glyph masks) and keeps Skia's semantics where tiny-skia differs:
 //!
-//! - axis-aligned rects and thick axis-aligned lines go through tiny-skia's exact
-//!   `fill_rect` coverage, like Skia's analytic AA, instead of the 4x supersampled
-//!   path filler;
+//! - axis-aligned rects and thick axis-aligned lines get exact rect coverage;
+//! - other paths are filled with exact-area coverage over the edges Skia's
+//!   analytic AA builds (`aaa`), not with tiny-skia's 4x4 supersampler;
+//! - text is drawn as cached per-glyph A8 masks (`text`);
 //! - translate-only image draws are bilinearly resampled at fractional offsets
 //!   (tiny-skia would silently switch such patterns to nearest-neighbour).
 
 use std::sync::Arc;
+
+use super::aaa;
+use super::raster::{Quantize, Rasterizer};
+use super::text::PlacedGlyph;
 
 use tiny_skia::{
     Color, FillRule, FilterQuality, GradientStop, LinearGradient, Mask, Path, PathBuilder, Pattern,
@@ -244,8 +249,17 @@ impl<'a> Canvas<'a> {
     }
 
     /// Rotates by `degrees` (clockwise in device space, like `SkCanvas::rotate`).
+    /// Like `SkMatrix::setRotate`, sines and cosines within 1/4096 of zero are
+    /// snapped to zero, so quarter turns stay exactly axis-aligned (text then
+    /// keeps hinting and subpixel positioning).
     pub(super) fn rotate(&mut self, degrees: f32) {
-        self.state.transform = self.state.transform.pre_rotate(degrees);
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let snap = |v: f32| if v.abs() <= 1.0 / 4096.0 { 0.0 } else { v };
+        let (sin, cos) = (snap(sin), snap(cos));
+        self.state.transform = self
+            .state
+            .transform
+            .pre_concat(Transform::from_row(cos, sin, -sin, cos, 0.0, 0.0));
     }
 
     /// Anti-aliased intersection with `rect` in local coordinates.
@@ -541,37 +555,89 @@ impl<'a> Canvas<'a> {
             }
             None => Source::Solid(premultiplied(paint.color)),
         };
-        self.fill_device_coverage(&device, &source, None);
+        self.fill_device_coverage(&device, &source);
     }
 
-    /// Fills a device-space glyph path the way Skia blits A8 glyph masks: the
-    /// coverage is remapped through `coverage_lut` (Skia's gamma/contrast
-    /// pre-blend) before it is blended with `color`.
-    pub(super) fn fill_glyph_path(&mut self, path: &Path, color: Color, coverage_lut: &[u8; 256]) {
-        if self.clip_is_empty() {
+    /// Blits glyph masks the way Skia blits A8 glyph masks: coverage is
+    /// remapped through `coverage_lut` (Skia's gamma/contrast pre-blend) and
+    /// then blended with `color`, one glyph after another.
+    pub(super) fn draw_glyphs(
+        &mut self,
+        glyphs: &[PlacedGlyph],
+        color: Color,
+        coverage_lut: &[u8; 256],
+    ) {
+        if self.clip_is_empty() || glyphs.is_empty() {
             return;
         }
-        self.fill_device_coverage(
-            path,
-            &Source::Solid(premultiplied(color)),
-            Some(coverage_lut),
-        );
+        let src = premultiplied(color);
+        let (width, height) = (self.pixmap.width() as i64, self.pixmap.height() as i64);
+        let clip_rect = self.state.clip.rect;
+        let path_mask = self.state.clip.path_mask.clone();
+        let row_bytes = width as usize * 4;
+        let mut coverage = Vec::new();
+        for glyph in glyphs {
+            let mask = &glyph.mask;
+            let gx = glyph.x + i64::from(mask.left);
+            let gy = glyph.y + i64::from(mask.top);
+            let mut x0 = gx.max(0);
+            let mut y0 = gy.max(0);
+            let mut x1 = (gx + mask.width as i64).min(width);
+            let mut y1 = (gy + mask.height as i64).min(height);
+            if let Some(clip) = clip_rect {
+                x0 = x0.max(clip.left.floor() as i64);
+                y0 = y0.max(clip.top.floor() as i64);
+                x1 = x1.min(clip.right.ceil() as i64);
+                y1 = y1.min(clip.bottom.ceil() as i64);
+            }
+            if x0 >= x1 || y0 >= y1 {
+                continue;
+            }
+            let span = (x1 - x0) as usize;
+            let data = self.pixmap.data_mut();
+            for y in y0..y1 {
+                let row_clip =
+                    clip_rect.map_or(255, |clip| span_coverage(y, clip.top, clip.bottom));
+                if row_clip == 0 {
+                    continue;
+                }
+                let mask_row =
+                    &mask.coverage[(y - gy) as usize * mask.width + (x0 - gx) as usize..][..span];
+                coverage.clear();
+                coverage.extend(mask_row.iter().map(|&c| coverage_lut[c as usize]));
+                if let Some(clip) = clip_rect {
+                    for (i, c) in coverage.iter_mut().enumerate() {
+                        let col = span_coverage(x0 + i as i64, clip.left, clip.right);
+                        if row_clip != 255 || col != 255 {
+                            *c = div255(u32::from(*c) * div255(row_clip * col)) as u8;
+                        }
+                    }
+                }
+                if let Some(path_mask) = &path_mask {
+                    let m = &path_mask.data()[(y * width + x0) as usize..][..span];
+                    for (c, &m) in coverage.iter_mut().zip(m) {
+                        *c = div255(u32::from(*c) * u32::from(m)) as u8;
+                    }
+                }
+                let dst = &mut data[y as usize * row_bytes + x0 as usize * 4..][..span * 4];
+                blend_solid_span(dst, &coverage, src);
+            }
+        }
     }
 
     /// Anti-aliased source-over fill of a device-space path (non-zero winding).
     ///
-    /// tiny-skia's rasterizer supersamples 4x4, so a nearly vertical edge only gets
-    /// 4 coverage levels and shows visible steps against Skia's analytic AA. The
-    /// path is therefore rasterized at `SUPERSAMPLE_X` times the horizontal
-    /// resolution (16x4 effective samples) into a bounds-sized mask and box-filtered
-    /// down. Extra vertical supersampling measured no fidelity gain on the fixture.
-    fn fill_device_coverage(&mut self, path: &Path, source: &Source, lut: Option<&[u8; 256]>) {
+    /// Coverage is the exact pixel area inside the path (see `raster`), like
+    /// Skia's analytic AA, instead of tiny-skia's 4x4 supersampling, which only
+    /// has a few coverage levels on near-vertical edges. The outline is the one
+    /// Skia's scan converter builds (see `aaa`), not the ideal one.
+    fn fill_device_coverage(&mut self, path: &Path, source: &Source) {
         let (width, height) = (self.pixmap.width() as i64, self.pixmap.height() as i64);
         let bounds = path.bounds();
         let mut x0 = (bounds.left().floor() as i64).max(0);
         let mut y0 = (bounds.top().floor() as i64).max(0);
-        let mut x1 = (bounds.right().ceil() as i64 + 1).min(width);
-        let mut y1 = (bounds.bottom().ceil() as i64 + 1).min(height);
+        let mut x1 = (bounds.right().ceil() as i64).min(width);
+        let mut y1 = (bounds.bottom().ceil() as i64).min(height);
         let clip_rect = self.state.clip.rect;
         if let Some(clip) = clip_rect {
             x0 = x0.max(clip.left.floor() as i64);
@@ -583,57 +649,68 @@ impl<'a> Canvas<'a> {
             return;
         }
         let (mw, mh) = ((x1 - x0) as usize, (y1 - y0) as usize);
-        let Some(mut hires) = Mask::new((mw * SUPERSAMPLE_X) as u32, (mh * SUPERSAMPLE_Y) as u32)
-        else {
-            return;
+        let mut raster = Rasterizer::new(mw, mh);
+        // The device clip Skia scan-converts against: the surface, narrowed to
+        // the (rounded-out) clip rect.
+        let mut device_clip = aaa::ClipRect {
+            left: 0.0,
+            top: 0.0,
+            right: width as f32,
+            bottom: height as f32,
         };
-        let (sx, sy) = (SUPERSAMPLE_X as f32, SUPERSAMPLE_Y as f32);
-        hires.fill_path(
-            path,
-            FillRule::Winding,
-            true,
-            Transform::from_row(sx, 0.0, 0.0, sy, -(x0 as f32) * sx, -(y0 as f32) * sy),
-        );
-        let coverage = downsample(hires.data(), mw, mh);
-
+        if let Some(clip) = clip_rect {
+            device_clip.left = device_clip.left.max(clip.left.floor());
+            device_clip.top = device_clip.top.max(clip.top.floor());
+            device_clip.right = device_clip.right.min(clip.right.ceil());
+            device_clip.bottom = device_clip.bottom.min(clip.bottom.ceil());
+        }
+        aaa::add_path(&mut raster, path, device_clip, (x0, y0));
+        // Clip-rect coverage of each column; `None` when every column is inside.
+        let clip_cols: Option<Vec<u32>> = clip_rect
+            .filter(|clip| clip.left > x0 as f32 || clip.right < x1 as f32)
+            .map(|clip| {
+                (x0..x1)
+                    .map(|x| span_coverage(x, clip.left, clip.right))
+                    .collect()
+            });
         let path_mask = self.state.clip.path_mask.clone();
+        let row_bytes = width as usize * 4;
         let data = self.pixmap.data_mut();
-        for y in y0..y1 {
+        let mut coverage = vec![0_u8; mw];
+        for row in raster.rows() {
+            raster.take_row(row, &mut coverage, Quantize::Round255);
+            let y = y0 + row as i64;
             let row_clip = clip_rect.map_or(255, |clip| span_coverage(y, clip.top, clip.bottom));
             if row_clip == 0 {
                 continue;
             }
-            let cov_row = &coverage[(y - y0) as usize * mw..][..mw];
-            for x in x0..x1 {
-                let raw = cov_row[(x - x0) as usize];
-                if raw == 0 {
-                    continue;
+            if row_clip != 255 || clip_cols.is_some() {
+                for (i, c) in coverage.iter_mut().enumerate() {
+                    let col = clip_cols.as_ref().map_or(255, |cols| cols[i]);
+                    *c = div255(u32::from(*c) * div255(row_clip * col)) as u8;
                 }
-                let mut cov = match lut {
-                    Some(lut) => u32::from(lut[raw as usize]),
-                    None => u32::from(raw),
-                };
-                if let Some(clip) = clip_rect {
-                    cov = div255(cov * div255(row_clip * span_coverage(x, clip.left, clip.right)));
+            }
+            if let Some(path_mask) = &path_mask {
+                let mask_row = &path_mask.data()[(y * width + x0) as usize..][..mw];
+                for (c, &m) in coverage.iter_mut().zip(mask_row) {
+                    *c = div255(u32::from(*c) * u32::from(m)) as u8;
                 }
-                if let Some(path_mask) = &path_mask {
-                    cov = div255(cov * u32::from(path_mask.data()[(y * width + x) as usize]));
-                }
-                if cov == 0 {
-                    continue;
-                }
-                let src = source.color_at(x, y);
-                let o = (y * width + x) as usize * 4;
-                if cov == 255 && src[3] == 255 {
-                    for c in 0..4 {
-                        data[o + c] = src[c] as u8;
+            }
+            let dst = &mut data[y as usize * row_bytes + x0 as usize * 4..][..mw * 4];
+            match source {
+                Source::Solid(color) => blend_solid_span(dst, &coverage, *color),
+                Source::Linear { .. } => {
+                    for (i, (px, &cov)) in dst
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(&coverage)
+                        .enumerate()
+                    {
+                        if cov != 0 {
+                            blend_pixel(px, source.color_at(x0 + i as i64, y), u32::from(cov));
+                        }
                     }
-                    continue;
-                }
-                let s = src.map(|v| div255(v * cov));
-                let inv = 255 - s[3];
-                for c in 0..4 {
-                    data[o + c] = (s[c] + div255(u32::from(data[o + c]) * inv)).min(255) as u8;
                 }
             }
         }
@@ -727,33 +804,27 @@ impl<'a> Canvas<'a> {
 /// Rects at most this thick (device px) are blended by `Canvas::blend_rect_solid`.
 const THIN_RECT: f32 = 4.0;
 
-/// Supersampling factors on top of tiny-skia's own 4x4 (see
-/// `Canvas::fill_device_coverage`).
-const SUPERSAMPLE_X: usize = 4;
-const SUPERSAMPLE_Y: usize = 1;
-
-/// Box-filters a supersampled coverage mask down to `w` x `h`.
-fn downsample(hires: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let stride = w * SUPERSAMPLE_X;
-    let n = (SUPERSAMPLE_X * SUPERSAMPLE_Y) as u32;
-    let mut out = vec![0_u8; w * h];
-    let mut sums = vec![0_u32; w];
-    for y in 0..h {
-        sums.fill(0);
-        for sub in 0..SUPERSAMPLE_Y {
-            let row = &hires[(y * SUPERSAMPLE_Y + sub) * stride..][..stride];
-            for (x, sum) in sums.iter_mut().enumerate() {
-                *sum += row[x * SUPERSAMPLE_X..][..SUPERSAMPLE_X]
-                    .iter()
-                    .map(|&v| u32::from(v))
-                    .sum::<u32>();
-            }
-        }
-        for (o, &sum) in out[y * w..][..w].iter_mut().zip(&sums) {
-            *o = ((sum + n / 2) / n) as u8;
+/// Source-over blend of a solid premultiplied colour through a coverage span.
+fn blend_solid_span(dst: &mut [u8], coverage: &[u8], src: [u32; 4]) {
+    let solid = src.map(|v| v as u8);
+    let opaque = src[3] == 255;
+    for (px, &cov) in dst.as_chunks_mut::<4>().0.iter_mut().zip(coverage) {
+        match cov {
+            0 => {}
+            255 if opaque => *px = solid,
+            cov => blend_pixel(px, src, u32::from(cov)),
         }
     }
-    out
+}
+
+/// Source-over of `src` (premultiplied) scaled by `cov` onto `px`.
+#[inline]
+fn blend_pixel(px: &mut [u8; 4], src: [u32; 4], cov: u32) {
+    let s = src.map(|v| div255(v * cov));
+    let inv = 255 - s[3];
+    for c in 0..4 {
+        px[c] = (s[c] + div255(u32::from(px[c]) * inv)).min(255) as u8;
+    }
 }
 
 fn premultiplied(color: Color) -> [u32; 4] {

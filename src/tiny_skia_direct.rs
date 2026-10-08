@@ -6,8 +6,10 @@
 //! `canvas`, `text` and `codec` submodules). Pixels are premultiplied RGBA8888.
 //! Fonts come only from `font_paths` / `font_dirs`; there is no system font lookup.
 
+mod aaa;
 mod canvas;
 mod codec;
+mod raster;
 mod text;
 
 use std::collections::HashMap;
@@ -1849,13 +1851,12 @@ impl<'a> DirectRenderer<'a> {
             let width = font.measure_str(text);
             draw_x -= width as f64;
         }
-        if let Some(path) = font.text_path(text, (as_f32(draw_x), as_f32(y)), canvas.transform()) {
-            canvas.fill_glyph_path(
-                &path,
-                color.to_color(),
-                text::glyph_coverage_lut(color.to_color()),
-            );
-        }
+        let glyphs = font.glyphs(text, (as_f32(draw_x), as_f32(y)), canvas.transform());
+        canvas.draw_glyphs(
+            &glyphs,
+            color.to_color(),
+            text::glyph_coverage_lut(color.to_color()),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
