@@ -1144,38 +1144,25 @@ impl TranslatedBlit<'_> {
         let s0 = ((lo + self.ox) * 4) as usize;
         let (wx, wy) = (self.wx as u16, self.wy as u16);
         let out = &mut dst[lo as usize * 4..hi as usize * 4];
+        // Opaque taps give opaque pixels: filter straight into the destination.
+        let taps = n + if wx == 0 { 0 } else { 4 };
+        let opaque = |row: &[u8]| {
+            row[s0..s0 + taps]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[3] == 255)
+        };
+        if opaque(r0) && (wy == 0 || opaque(r1)) {
+            filter_taps(out, r0, r1, s0, wx, wy);
+            return;
+        }
         SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
             scratch.clear();
             scratch.resize(n, 0);
             let filtered = &mut scratch[..];
-            let lerp = |a: u8, b: u8, w: u16| -> u16 {
-                (u16::from(a) * (256 - w) + u16::from(b) * w + 128) >> 8
-            };
-            match (wx, wy) {
-                (0, 0) => filtered.copy_from_slice(&r0[s0..s0 + n]),
-                (0, _) => {
-                    for ((f, &a), &b) in filtered.iter_mut().zip(&r0[s0..]).zip(&r1[s0..]) {
-                        *f = lerp(a, b, wy) as u8;
-                    }
-                }
-                (_, 0) => {
-                    for ((f, &a), &b) in filtered.iter_mut().zip(&r0[s0..]).zip(&r0[s0 + 4..]) {
-                        *f = lerp(a, b, wx) as u8;
-                    }
-                }
-                _ => {
-                    let rows = r0[s0..]
-                        .iter()
-                        .zip(&r0[s0 + 4..])
-                        .zip(r1[s0..].iter().zip(&r1[s0 + 4..]));
-                    for (f, ((&a, &b), (&c, &d))) in filtered.iter_mut().zip(rows) {
-                        let top = lerp(a, b, wx);
-                        let bottom = lerp(c, d, wx);
-                        *f = ((top * (256 - wy) + bottom * wy + 128) >> 8) as u8;
-                    }
-                }
-            }
+            filter_taps(filtered, r0, r1, s0, wx, wy);
             for (o, p) in out
                 .as_chunks_mut::<4>()
                 .0
@@ -1232,6 +1219,38 @@ impl TranslatedBlit<'_> {
             let inv = 255 - s[3];
             for c in 0..4 {
                 dst[o + c] = (s[c] + div255(u32::from(dst[o + c]) * inv)).min(255) as u8;
+            }
+        }
+    }
+}
+
+/// Bilinear filter with constant weights over a run of pixels, bytewise: taps
+/// at `s0` (and `s0 + 4` to the right) in rows `r0` and `r1`.
+fn filter_taps(out: &mut [u8], r0: &[u8], r1: &[u8], s0: usize, wx: u16, wy: u16) {
+    let n = out.len();
+    let lerp =
+        |a: u8, b: u8, w: u16| -> u16 { (u16::from(a) * (256 - w) + u16::from(b) * w + 128) >> 8 };
+    match (wx, wy) {
+        (0, 0) => out.copy_from_slice(&r0[s0..s0 + n]),
+        (0, _) => {
+            for ((f, &a), &b) in out.iter_mut().zip(&r0[s0..]).zip(&r1[s0..]) {
+                *f = lerp(a, b, wy) as u8;
+            }
+        }
+        (_, 0) => {
+            for ((f, &a), &b) in out.iter_mut().zip(&r0[s0..]).zip(&r0[s0 + 4..]) {
+                *f = lerp(a, b, wx) as u8;
+            }
+        }
+        _ => {
+            let rows = r0[s0..]
+                .iter()
+                .zip(&r0[s0 + 4..])
+                .zip(r1[s0..].iter().zip(&r1[s0 + 4..]));
+            for (f, ((&a, &b), (&c, &d))) in out.iter_mut().zip(rows) {
+                let top = lerp(a, b, wx);
+                let bottom = lerp(c, d, wx);
+                *f = ((top * (256 - wy) + bottom * wy + 128) >> 8) as u8;
             }
         }
     }
