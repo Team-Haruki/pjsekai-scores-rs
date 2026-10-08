@@ -703,7 +703,13 @@ impl<'a> Canvas<'a> {
             device_clip.right = device_clip.right.min(clip.right.ceil());
             device_clip.bottom = device_clip.bottom.min(clip.bottom.ceil());
         }
-        aaa::add_path(&mut raster, path, device_clip, (x0, y0), may_overlap);
+        if x1.max(y1) < aaa::MAX_COORDINATE {
+            aaa::add_path(&mut raster, path, device_clip, (x0, y0), may_overlap);
+        } else {
+            // Beyond Skia's fixed-point range (it stops anti-aliasing there);
+            // rasterize the ideal outline instead.
+            raster.add_path(path, Transform::from_translate(-(x0 as f32), -(y0 as f32)));
+        }
         // Clip-rect coverage of each column; `None` when every column is inside.
         let clip_cols: Option<Vec<u32>> = clip_rect
             .filter(|clip| clip.left > x0 as f32 || clip.right < x1 as f32)

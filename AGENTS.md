@@ -17,13 +17,15 @@ The original Python implementation lives at `../scores/` and is the reference fo
 cargo build --release
 cargo build --release --features skia-image
 cargo build --release --features tiny-skia-image   # experimental pure-Rust backend
+cargo build --release --features tiny-skia-image,system-fonts   # + fontdb system font fallback
 cargo check
 cargo check --features python
 cargo check --features 'python skia-image'
 cargo check --target wasm32-unknown-unknown --no-default-features --features wasm --lib
 cargo test
 cargo test --features skia-image
-cargo test --features skia-image,tiny-skia-image   # includes tiny-skia vs Skia similarity tests
+cargo test --features tiny-skia-image                             # golden crops (Linux + DejaVu Sans)
+cargo test --features skia-image,tiny-skia-image,system-fonts    # + tiny-skia vs Skia similarity tests
 cargo test <test_name>                        # single test
 cargo clippy --all-targets -- -D warnings     # CI requires clean (default features)
 cargo clippy --all-targets --features python,skia-image -- -D warnings  # CI requires clean
@@ -137,7 +139,9 @@ Fidelity work is Linux-Skia-specific on purpose, and mostly emulates what Skia a
 - **Text** (`text.rs`): rounded (hinted) advances, glyph origins snapped to 1/4 px on the advance axis (quarter turns are snapped exactly, as `SkMatrix::setRotate` does, so rotated text keeps hinting), skrifa hinting, per-glyph A8 masks in a process-wide strike cache. Regular glyphs are rasterized like FreeType's `ftgrays` (26.6 points, its curve bisection, its coverage rounding); fake bold is Skia's stroke-and-fill path (miter join, `size * lerp(1/24, 1/32)` between 9 and 36 px) through the analytic AA emulation. Masks go through Skia's A8 gamma pre-blend (sRGB, contrast 0.5).
 - **Images**: translate-only image draws use a custom bilinear blit because tiny-skia would switch them to nearest-neighbour.
 
-Keep `tests/tiny_skia_backend.rs` green; set `PJSEKAI_SCORES_FIXTURE_DATA` / `PJSEKAI_SCORES_FIXTURE_FONTS` to also run the Drawing API chart fixture.
+Fonts: only `font_paths` / `font_dirs`, plus the system fonts through fontdb with the `system-fonts` feature (`system_fonts.rs`, scanned lazily once per process); with neither, rendering returns `SkiaDirectError::NoFonts` rather than silently dropping text. JPEG is mozjpeg-rs in its libjpeg-turbo-compatible mode (one interleaved baseline scan; jpeg-encoder's optimized output was three scans that zune-jpeg misreads). Note sprites and recent jackets are decoded once per process in both backends (`NOTE_ASSET_CACHE`, `JACKET_CACHE`, keyed by path, modified time and size).
+
+`tests/golden/*.png` are crops of the synthetic test chart as Linux Skia renders it with DejaVu Sans 2.37; regenerate them with `PJSEKAI_SCORES_UPDATE_GOLDEN=1 cargo test --features skia-image,tiny-skia-image golden` on Linux when a rendering change is intended. Keep `tests/tiny_skia_backend.rs` green; set `PJSEKAI_SCORES_FIXTURE_DATA` / `PJSEKAI_SCORES_FIXTURE_FONTS` to also run the Drawing API chart fixture.
 
 ### Raw strings with `href="#`
 The literal `href="#` contains `"#` which prematurely closes `r#"..."#` raw strings. Use `r##"..."##` for any format string containing this pattern.
@@ -244,13 +248,16 @@ The files in `.github/workflows` are thin callers:
 - `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual
   dispatch:
   - `Rust` (`rust-ci`): `cargo fmt --check`; clippy `--all-targets -D warnings` for the
-    default features, `--features python,skia-image` (fontconfig/freetype from apt) and
-    `--features python,tiny-skia-image`; `cargo check --target wasm32-unknown-unknown
-    --no-default-features --features wasm`; the tests run under `cargo llvm-cov` for the
-    default features and for `--features skia-image,tiny-skia-image`.
+    default features, `--features python,skia-image` (fontconfig/freetype from apt),
+    `--features python,tiny-skia-image` and `--features python,tiny-skia-image,system-fonts`;
+    `cargo check --target wasm32-unknown-unknown --no-default-features --features wasm`; a
+    debug build of the CLI for `x86_64-unknown-linux-musl` with
+    `tiny-skia-image,system-fonts`, checked to be statically linked and to render PNG/JPEG;
+    the tests run under `cargo llvm-cov` for the default features,
+    `--features tiny-skia-image` and `--features skia-image,tiny-skia-image,system-fonts`.
   - `Wheel smoke` (`maturin-wheels`): one linux-x64 wheel per package
     (`pjsekai-scores-rs` and `pjsekai-scores-rs-skia-image`, plus an unpublished
-    `pjsekai-scores-rs-tiny-skia-image` smoke build), installed and imported, so the PyO3
+    `pjsekai-scores-rs-tiny-skia-image` smoke build with `system-fonts`), installed and imported, so the PyO3
     bindings and both raster backends are compiled on every PR.
   - `Sonar` scans the coverage (skipped green on Dependabot/fork PRs); `Workflow lint`
     runs actionlint.

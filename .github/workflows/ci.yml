@@ -23,18 +23,33 @@ jobs:
     uses: seiunx-dev/ci-templates/.github/workflows/rust-ci.yml@v1
     with:
       coverage: true
-      apt-packages: libfontconfig1-dev libfreetype-dev
+      # musl-tools and DejaVu are for the static tiny-skia CLI check in extra-lint-command.
+      apt-packages: libfontconfig1-dev libfreetype-dev musl-tools fonts-dejavu-core
       # python + skia-image were first compiled at release time before; lint them on every PR
       feature-sets: |
         default
         --features python,skia-image
         --features python,tiny-skia-image
-      # Both raster backends together run the tiny-skia vs Skia similarity tests.
+        --features python,tiny-skia-image,system-fonts
+      # tiny-skia alone runs the golden crops and the no-font error path; both raster
+      # backends together run the tiny-skia vs Skia similarity tests.
       test-feature-sets: |
         default
-        --features skia-image,tiny-skia-image
-      targets: wasm32-unknown-unknown
-      extra-lint-command: cargo check --locked --target wasm32-unknown-unknown --no-default-features --features wasm
+        --features tiny-skia-image
+        --features skia-image,tiny-skia-image,system-fonts
+      targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
+      # The tiny-skia backend must keep building as a fully static musl CLI (no C++,
+      # no system libraries); the template has no musl job, so build and run it here.
+      extra-lint-command: |
+        set -euo pipefail
+        cargo check --locked --target wasm32-unknown-unknown --no-default-features --features wasm
+        cargo build --locked --target x86_64-unknown-linux-musl --features tiny-skia-image,system-fonts
+        bin=target/x86_64-unknown-linux-musl/debug/pjsekai-scores-rs
+        file "$bin" | grep -E 'static(-pie)? linked'
+        printf '#BPM01: 120\n#00008: 01\n#00012: 14\n#00013: 13\n' > "$RUNNER_TEMP/smoke.sus"
+        "$bin" "$RUNNER_TEMP/smoke.sus" --font-path /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf -o "$RUNNER_TEMP/smoke.png"
+        "$bin" "$RUNNER_TEMP/smoke.sus" -o "$RUNNER_TEMP/smoke.jpg"
+        test -s "$RUNNER_TEMP/smoke.png" && test -s "$RUNNER_TEMP/smoke.jpg"
 
   wheel-smoke:
     name: Wheel smoke
@@ -46,7 +61,7 @@ jobs:
       configure-command: |
         case "$WHEEL_VARIANT" in
           skia-image) export PYTHON_PACKAGE_NAME=pjsekai-scores-rs-skia-image MATURIN_FEATURES_TOML='["python", "skia-image"]' ;;
-          tiny-skia-image) export PYTHON_PACKAGE_NAME=pjsekai-scores-rs-tiny-skia-image MATURIN_FEATURES_TOML='["python", "tiny-skia-image"]' ;;
+          tiny-skia-image) export PYTHON_PACKAGE_NAME=pjsekai-scores-rs-tiny-skia-image MATURIN_FEATURES_TOML='["python", "tiny-skia-image", "system-fonts"]' ;;
           *)          export PYTHON_PACKAGE_NAME=pjsekai-scores-rs MATURIN_FEATURES_TOML='["python"]' ;;
         esac
         bash .github/scripts/configure-python-package.sh

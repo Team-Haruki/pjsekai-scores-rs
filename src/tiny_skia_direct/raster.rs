@@ -9,20 +9,16 @@
 //!
 //! What reaches it decides how close it is to a given renderer: `aaa` feeds it
 //! the edges Skia's analytic AA builds, `add_path_freetype` the lines FreeType's
-//! `ftgrays` draws for a glyph. `add_path` (tests only) flattens the ideal
-//! outline finely.
+//! `ftgrays` draws for a glyph, and `add_path` flattens the ideal outline
+//! finely (paths beyond Skia's coordinate range).
 
 use std::cell::RefCell;
 
-#[cfg(test)]
-use tiny_skia::Transform;
-use tiny_skia::{Path, PathSegment, Point};
+use tiny_skia::{Path, PathSegment, Point, Transform};
 
 /// Maximum distance between a flattened curve and the true curve, in pixels.
-#[cfg(test)]
 const FLATTEN_TOLERANCE: f32 = 1.0 / 32.0;
 /// Upper bound on the number of lines a single curve is split into.
-#[cfg(test)]
 const MAX_CURVE_LINES: u32 = 512;
 
 /// How exact area maps to 8-bit coverage.
@@ -85,7 +81,6 @@ impl Rasterizer {
 
     /// Adds every contour of `path`, mapped by `ts` (box coordinates: the box's
     /// top-left pixel corner is the origin). Open contours are closed.
-    #[cfg(test)]
     pub(super) fn add_path(&mut self, path: &Path, ts: Transform) {
         let map = |p: Point| {
             let mut p = p;
@@ -197,7 +192,6 @@ impl Rasterizer {
         }
     }
 
-    #[cfg(test)]
     fn quad(&mut self, p0: Point, p1: Point, p2: Point) {
         // Wang's formula for quadratics: n = sqrt(|p0 - 2p1 + p2| / (4 tol)).
         let dd = (p0.x - 2.0 * p1.x + p2.x).hypot(p0.y - 2.0 * p1.y + p2.y);
@@ -219,7 +213,6 @@ impl Rasterizer {
         }
     }
 
-    #[cfg(test)]
     fn cubic(&mut self, p0: Point, p1: Point, p2: Point, p3: Point) {
         // Wang's formula for cubics: n = sqrt(3/4 * max|second difference| / tol).
         let d1 = (p0.x - 2.0 * p1.x + p2.x).hypot(p0.y - 2.0 * p1.y + p2.y);
@@ -439,7 +432,6 @@ fn freetype_cubic(
     go([p0, p1, p2, p3], 0, out);
 }
 
-#[cfg(test)]
 fn curve_lines(n: f32) -> u32 {
     if n.is_finite() {
         (n.ceil() as u32).clamp(1, MAX_CURVE_LINES)

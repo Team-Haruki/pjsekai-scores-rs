@@ -85,8 +85,12 @@ fn system_test_font() -> Option<(&'static str, &'static str)> {
 
 #[test]
 fn renders_premultiplied_rgba_raster_png_and_jpeg() {
+    let Some(font) = system_test_font() else {
+        eprintln!("skipped: no known system TrueType font");
+        return;
+    };
     let mut score = Score::parse(CHART);
-    let mut drawing = vector_drawing(system_test_font());
+    let mut drawing = vector_drawing(Some(font));
     let raster = score_to_skia_raster(&mut drawing, &mut score, None).expect("raster");
     assert!(raster.width > 0 && raster.height > 0);
     assert_eq!(raster.color_type, SkiaRasterColorType::Rgba8888);
@@ -201,10 +205,18 @@ mod versus_skia {
         similarity(&rgba(&skia.pixels, skia_bgra), &tiny.pixels)
     }
 
-    // Loose bounds: Linux (FreeType) Skia measures ~41 dB / 0.1% on the fixture;
-    // macOS Skia lays text out with CoreText (unrounded advances, other gamma), so
-    // these thresholds leave room for that while still catching broken drawing.
+    // On Linux both backends rasterize like FreeType + Skia's analytic AA: the
+    // synthetic chart measures ~63 dB and the Drawing fixture ~54 dB, so a drop
+    // below 50 dB is a regression. macOS Skia lays text out with CoreText
+    // (unrounded advances, other gamma), so other platforms only catch broken
+    // drawing.
+    #[cfg(target_os = "linux")]
+    const MIN_PSNR: f64 = 50.0;
+    #[cfg(not(target_os = "linux"))]
     const MIN_PSNR: f64 = 24.0;
+    #[cfg(target_os = "linux")]
+    const MAX_OVER_32: f64 = 0.0005;
+    #[cfg(not(target_os = "linux"))]
     const MAX_OVER_32: f64 = 0.02;
 
     #[test]
@@ -214,6 +226,12 @@ mod versus_skia {
             return;
         };
         let similarity = compare(|| (vector_drawing(Some(font)), Score::parse(CHART)), None);
+        eprintln!(
+            "vector chart ({}): PSNR {:.2} dB, {:.3}% > 32",
+            font.1,
+            similarity.psnr,
+            similarity.over_32 * 100.0
+        );
         assert!(
             similarity.psnr >= MIN_PSNR,
             "PSNR {:.2} dB",
@@ -224,6 +242,22 @@ mod versus_skia {
             "{:.3}% pixels differ by more than 32",
             similarity.over_32 * 100.0
         );
+    }
+
+    /// Without registered fonts both backends take text from the system fonts
+    /// (fontconfig for Skia, fontdb for tiny-skia).
+    #[cfg(feature = "system-fonts")]
+    #[test]
+    fn tiny_skia_matches_skia_with_system_fonts_only() {
+        let similarity = compare(|| (vector_drawing(None), Score::parse(CHART)), None);
+        eprintln!(
+            "system fonts: PSNR {:.2} dB, {:.3}% > 32",
+            similarity.psnr,
+            similarity.over_32 * 100.0
+        );
+        // fontconfig and fontdb may still pick different faces for a family
+        // list; this only proves that text is drawn and lands in the same place.
+        assert!(similarity.psnr >= 24.0, "PSNR {:.2} dB", similarity.psnr);
     }
 
     #[test]
@@ -276,5 +310,115 @@ mod versus_skia {
             similarity.psnr
         );
         assert!(similarity.over_32 <= MAX_OVER_32);
+    }
+}
+
+/// Crops of the synthetic chart as Linux Skia renders it (FreeType, DejaVu Sans
+/// 2.37), checked in under `tests/golden/`: they keep the tiny-skia backend's
+/// fidelity testable without the Skia backend. Regenerate them with
+/// `PJSEKAI_SCORES_UPDATE_GOLDEN=1 cargo test --features skia-image,tiny-skia-image
+/// golden` on Linux.
+const GOLDEN_CROPS: &[(&str, u32, u32, u32, u32)] = &[
+    // Beat labels, speed text, notes with glow, grid lines.
+    ("labels-and-notes", 50, 30, 230, 530),
+    // Rotated bar-count/BPM text, a slide, tap and long notes.
+    ("slide-and-bpm", 30, 2300, 256, 200),
+    // Flick arrows and critical notes.
+    ("flicks", 320, 2040, 96, 448),
+];
+
+fn golden_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden")
+        .join(format!("{name}.png"))
+}
+
+/// Opaque RGB of a crop of an RGBA8888 (premultiplied, opaque) raster.
+fn crop_rgb(pixels: &[u8], width: u32, bgra: bool, rect: (u32, u32, u32, u32)) -> Vec<u8> {
+    let (x0, y0, w, h) = rect;
+    let mut out = Vec::with_capacity((w * h * 3) as usize);
+    for y in y0..y0 + h {
+        for x in x0..x0 + w {
+            let p = &pixels[((y * width + x) * 4) as usize..][..4];
+            if bgra {
+                out.extend_from_slice(&[p[2], p[1], p[0]]);
+            } else {
+                out.extend_from_slice(&p[..3]);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn matches_golden_skia_crops() {
+    let Some(font) = system_test_font().filter(|font| font.1 == "DejaVu Sans") else {
+        eprintln!("skipped: the golden crops were made with DejaVu Sans");
+        return;
+    };
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipped: the golden crops follow Linux (FreeType) text rendering");
+        return;
+    }
+    #[cfg(feature = "skia-image")]
+    if std::env::var_os("PJSEKAI_SCORES_UPDATE_GOLDEN").is_some() {
+        let mut drawing = vector_drawing(Some(font));
+        let mut score = Score::parse(CHART);
+        let skia =
+            pjsekai_scores_rs::skia_direct::score_to_skia_raster(&mut drawing, &mut score, None)
+                .expect("skia raster");
+        let bgra = skia.color_type == pjsekai_scores_rs::skia_direct::SkiaRasterColorType::Bgra8888;
+        eprintln!("chart is {}x{}", skia.width, skia.height);
+        for &(name, x, y, w, h) in GOLDEN_CROPS {
+            let rgb = crop_rgb(&skia.pixels, skia.width as u32, bgra, (x, y, w, h));
+            let file = std::fs::File::create(golden_path(name)).expect("golden file");
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_compression(png::Compression::High);
+            let mut writer = encoder.write_header().expect("png header");
+            writer.write_image_data(&rgb).expect("png data");
+        }
+        return;
+    }
+
+    let mut drawing = vector_drawing(Some(font));
+    let mut score = Score::parse(CHART);
+    let tiny = score_to_skia_raster(&mut drawing, &mut score, None).expect("raster");
+    for &(name, x, y, w, h) in GOLDEN_CROPS {
+        let decoder = png::Decoder::new(std::io::BufReader::new(
+            std::fs::File::open(golden_path(name)).expect("golden crop"),
+        ));
+        let mut reader = decoder.read_info().expect("golden header");
+        let mut expected = vec![0; reader.output_buffer_size().expect("size")];
+        reader.next_frame(&mut expected).expect("golden data");
+        let actual = crop_rgb(&tiny.pixels, tiny.width as u32, false, (x, y, w, h));
+        assert_eq!(expected.len(), actual.len(), "{name}");
+        let (mut sq, mut over_32) = (0.0_f64, 0_usize);
+        for (e, a) in expected
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(actual.as_chunks::<3>().0)
+        {
+            let mut max = 0;
+            for c in 0..3 {
+                let d = i32::from(e[c]) - i32::from(a[c]);
+                sq += f64::from(d * d);
+                max = max.max(d.abs());
+            }
+            over_32 += usize::from(max > 32);
+        }
+        let mse = sq / expected.len() as f64;
+        let psnr = if mse == 0.0 {
+            f64::INFINITY
+        } else {
+            10.0 * (255.0_f64 * 255.0 / mse).log10()
+        };
+        eprintln!("golden {name}: PSNR {psnr:.2} dB, {over_32} px > 32");
+        assert!(psnr >= 45.0, "{name}: PSNR {psnr:.2} dB");
+        assert!(
+            over_32 * 1000 <= (w * h) as usize,
+            "{name}: {over_32} px > 32"
+        );
     }
 }

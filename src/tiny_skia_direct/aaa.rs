@@ -25,6 +25,10 @@ const QUARTER: i32 = FIXED_ONE >> 2;
 const HALF: i32 = FIXED_ONE >> 1;
 const MAX_COEFF_SHIFT: i32 = 6;
 
+/// Device coordinates at and beyond this overflow Skia's 16.16 edge math
+/// (`SkScan::AntiFillPath` switches to aliased filling there).
+pub(super) const MAX_COORDINATE: i64 = 8192;
+
 /// The device clip rect, in whole pixels.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ClipRect {
@@ -1267,8 +1271,120 @@ fn cubic_delta_from_line(v: [i32; 4]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_convex, snap_y, walk};
-    use tiny_skia::PathBuilder;
+    use super::{ClipRect, add_path, is_convex, snap_y, walk};
+    use crate::tiny_skia_direct::raster::{Quantize, Rasterizer};
+    use tiny_skia::{PathBuilder, Transform};
+
+    /// xorshift64*, enough for deterministic fuzzing without a dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> f32 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 40) as f32 / (1u64 << 24) as f32
+        }
+    }
+
+    fn total_coverage(raster: &mut Rasterizer, width: usize, height: usize) -> f64 {
+        let mut row = vec![0; width];
+        let mut sum = 0.0;
+        for y in 0..height {
+            raster.take_row(y, &mut row, Quantize::Round255);
+            sum += row.iter().map(|&c| f64::from(c) / 255.0).sum::<f64>();
+        }
+        sum
+    }
+
+    #[test]
+    fn random_paths_stay_close_to_the_ideal_outline() {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        let (w, h) = (64_usize, 48_usize);
+        for case in 0..300 {
+            // A star-shaped polygon with curved edges around the box centre, often
+            // reaching outside the box (clipped) and sometimes self-overlapping.
+            let mut b = PathBuilder::new();
+            let n = 3 + (rng.next() * 6.0) as usize;
+            let (cx, cy) = (rng.next() * 64.0, rng.next() * 48.0);
+            let mut points = Vec::new();
+            for i in 0..n {
+                let angle = (i as f32 + rng.next() * 0.8) / n as f32 * std::f32::consts::TAU;
+                let radius = 4.0 + rng.next() * 50.0;
+                points.push((cx + radius * angle.cos(), cy + radius * angle.sin()));
+            }
+            b.move_to(points[0].0, points[0].1);
+            for (i, p) in points.iter().enumerate().skip(1) {
+                match i % 3 {
+                    0 => b.line_to(p.0, p.1),
+                    1 => b.quad_to(cx, cy, p.0, p.1),
+                    _ => b.cubic_to(p.0, cy, cx, p.1, p.0, p.1),
+                }
+            }
+            b.close();
+            let Some(path) = b.finish() else { continue };
+            let clip = ClipRect {
+                left: 0.0,
+                top: 0.0,
+                right: w as f32,
+                bottom: h as f32,
+            };
+            for may_overlap in [false, true] {
+                let mut skia = Rasterizer::new(w, h);
+                add_path(&mut skia, &path, clip, (0, 0), may_overlap);
+                let mut ideal = Rasterizer::new(w, h);
+                ideal.add_path(&path, Transform::identity());
+                let (a, b) = (
+                    total_coverage(&mut skia, w, h),
+                    total_coverage(&mut ideal, w, h),
+                );
+                // Fixed-point snapping moves each edge by well under a pixel.
+                let perimeter_slack = 0.5 * (w + h) as f64;
+                assert!(
+                    (a - b).abs() <= perimeter_slack.max(b * 0.05),
+                    "case {case}: emulated {a:.1} vs ideal {b:.1}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn degenerate_and_huge_inputs_do_not_panic() {
+        let clip = ClipRect {
+            left: 0.0,
+            top: 0.0,
+            right: 16.0,
+            bottom: 16.0,
+        };
+        let mut paths = Vec::new();
+        let mut b = PathBuilder::new();
+        b.move_to(-1e7, -1e7);
+        b.cubic_to(1e7, -1e7, -1e7, 1e7, 1e7, 1e7);
+        b.line_to(8.0, 8.0);
+        b.close();
+        paths.push(b.finish());
+        let mut b = PathBuilder::new();
+        b.move_to(4.0, 4.0);
+        b.cubic_to(4.0, 4.0, 4.0, 4.0, 4.0, 4.0);
+        b.quad_to(4.0, 4.0, 4.0, 4.0);
+        b.line_to(4.0, 4.0);
+        paths.push(b.finish());
+        let mut b = PathBuilder::new();
+        b.move_to(0.0, 8.0);
+        b.line_to(16.0, 8.0);
+        b.line_to(0.0, 8.0001);
+        paths.push(b.finish());
+        for path in paths.into_iter().flatten() {
+            for may_overlap in [false, true] {
+                let mut raster = Rasterizer::new(16, 16);
+                add_path(&mut raster, &path, clip, (0, 0), may_overlap);
+                let mut row = vec![0; 16];
+                for y in 0..16 {
+                    raster.take_row(y, &mut row, Quantize::Round255);
+                }
+            }
+        }
+    }
 
     #[test]
     fn snaps_to_quarter_pixels() {
