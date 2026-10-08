@@ -12,9 +12,9 @@ Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` p
 
 - Use `rustfmt` defaults (no manual formatting rules).
 - Prefer `impl From<X> for Y` over standalone conversion functions.
-- Use `thiserror` for error types; propagate with `?`.
+- Error types implement `Display` and `std::error::Error` by hand (there is no `thiserror` dependency); propagate with `?`.
 - Keep `python.rs` as a thin binding layer — no business logic. All logic lives in the core modules.
-- Embed static assets (CSS) with `include_str!` at compile time.
+- The default CSS theme (`css/default.css`) is embedded with `include_str!` at compile time.
 
 ---
 
@@ -25,7 +25,7 @@ Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` p
 type NoteIdx = usize;
 const NO_NOTE: NoteIdx = usize::MAX;
 ```
-Cross-references between notes are stored as `NoteIdx` into `Score::notes: Vec<NoteData>`. Never introduce `Rc`, `Arc`, or `RefCell` — they break PyO3 free-threaded compatibility.
+Cross-references between notes are stored as `NoteIdx` into `Score::notes: Vec<NoteData>`. Never introduce `Rc` or `RefCell` — they break PyO3 free-threaded compatibility. `Arc` is `Send + Sync` and is already used for the shared custom-font cache in `skia_direct.rs`.
 
 ### `#[cfg(feature = "python")]` guards all PyO3 code
 The crate must build as a pure Rust library without the `python` feature:
@@ -89,7 +89,8 @@ Public Python-facing names use snake_case matching the original `pjsekai.scores`
 ```bash
 cargo build --release                   # Rust crate + CLI (bin: pjsekai-scores-rs)
 cargo test                              # Rust unit tests
-cargo clippy -- -D warnings             # Lint (must be clean)
+cargo clippy --all-targets -- -D warnings                               # Lint (must be clean)
+cargo clippy --all-targets --features python,skia-image -- -D warnings  # CI lints this set too
 maturin build --release -i python3.14t  # Python 3.14t wheel
 pip install pjsekai-scores-rs           # Install from PyPI
 uv pip install target/wheels/*.whl      # Install local wheel into venv
@@ -155,7 +156,9 @@ The files in `.github/workflows` are thin callers:
     the PyO3 bindings and the Skia build are compiled on every PR.
   - `Sonar` scans the coverage (skipped green on Dependabot/fork PRs); `Workflow lint`
     runs actionlint.
-- The aggregate job **`CI OK`** is the only required status check.
+- The aggregate job **`CI OK`** summarises the run and is what `release-gate` waits for.
+  `main` currently has no branch protection or ruleset, so no status check is enforced
+  on merge; check `CI OK` yourself before merging.
 - `release.yml` (`Release`) replaces the old `release.yml` + `release-crate.yml` +
   `release-python.yml` (which rewrote the version from the tag with `sed`). Bump
   `version` in **both** `Cargo.toml` and `pyproject.toml` (and the package's own entry in

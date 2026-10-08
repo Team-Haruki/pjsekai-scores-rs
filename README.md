@@ -36,7 +36,7 @@ The dominant win is SVG generation: Rust replaces thousands of Python `svgwrite`
 ## CLI Usage
 
 ```
-pjsekai-scores-rs <SCORE> [OPTIONS]
+Usage: pjsekai-scores-rs [OPTIONS] <SCORE>
 
 Arguments:
   <SCORE>  The score file (.sus or Project SEKAI custom chart JSON)
@@ -49,10 +49,10 @@ Options:
       --css <CSS>                Custom CSS stylesheet
       --note-host <NOTE_HOST>    Base URL for SVG note assets, or local directory for Skia image note assets
                                  [default: https://asset3.pjsekai.moe/live/note/custom01]
-      --note-asset-extension <EXTENSION>
+      --note-asset-extension <NOTE_ASSET_EXTENSION>
                                  File extension for note asset files [default: png]
-      --font-path <FONT_PATH>    Font file path to load for Skia image output; may be repeated
-      --font-dir <FONT_DIR>      Directory containing .ttf/.otf/.ttc fonts for Skia image output; may be repeated
+      --font-path <FONT_PATHS>   Font file path to load for Skia image output; may be repeated
+      --font-dir <FONT_DIRS>     Directory containing .ttf/.otf/.ttc fonts for Skia image output; may be repeated
       --title <TITLE>            Music title shown in the chart footer
       --artist <ARTIST>          Music artist shown in the chart footer
       --difficulty <DIFFICULTY>  Difficulty shown in the chart footer
@@ -64,9 +64,8 @@ Options:
       --jpeg-quality <JPEG_QUALITY>
                                  JPEG quality for .jpg/.jpeg output (0-100) [default: 90]
       --perf                     Print render/write timing statistics
-      --generator <GENERATOR>    Generator name shown in the SVG subtitle
-                                 [default: HarukiBot NEO]
   -o, --output <OUTPUT>          Output file path (.svg, .png, .jpg, or .jpeg)
+      --generator <GENERATOR>    Generator name shown in the SVG subtitle
   -h, --help                     Print help
 ```
 
@@ -172,7 +171,7 @@ cargo build --release --bin pjsekai-scores-rs
 cargo build --release --features skia-image --bin pjsekai-scores-rs
 ```
 
-GitHub CLI releases build both variants for each target. Skia-enabled assets are named with a `-skia-image` suffix.
+GitHub releases ship only the standard CLI (SVG output) for linux-x64, macos-arm64 and windows-x64. Build the Skia CLI from source with `--features skia-image` when you need PNG/JPEG output.
 
 ---
 
@@ -212,7 +211,7 @@ Or build and install from source (requires [maturin](https://github.com/PyO3/mat
 # Default wheel: Python bindings without Skia image output support.
 maturin develop --release
 
-# Optional Skia image wheel for local/private use.
+# Skia image wheel (the same build as the pjsekai-scores-rs-skia-image package).
 maturin develop --release --features python,skia-image
 ```
 
@@ -518,7 +517,7 @@ Add `--features python,skia-image` to build an optional Skia image wheel from so
 pjsekai-scores-rs/
 ├── Cargo.toml          # Rust package manifest + PyO3/Skia feature flags
 ├── pyproject.toml      # maturin build config (module name: pjsekai_scores_rs)
-├── css/                # Built-in CSS themes (default, black, white, guess)
+├── css/                # CSS themes; default.css is built in, black/white/guess/color are for --css
 └── src/
     ├── main.rs         # CLI entry point (clap)
     ├── lib.rs          # Crate root + PyO3 module registration
@@ -531,7 +530,7 @@ pjsekai-scores-rs/
     ├── rebase.rs       # BPM/timing rebase transformation
     ├── drawing.rs      # SVG renderer (direct String building)
     ├── skia_direct.rs  # Direct Skia PNG/JPEG renderer
-    ├── python.rs       # PyO3 bindings (Score, Drawing, Rebase, Lyric, Event)
+    ├── python.rs       # PyO3 bindings (Fraction, Meta, Event, Score, Lyric, Rebase, Drawing; RasterImage with skia-image)
     ├── wasm.rs         # wasm-bindgen bindings (Score, Drawing, Rebase, Lyric)
     ├── notes.rs        # NoteData enum + NoteBase + arena index pattern
     └── notes/
@@ -546,13 +545,13 @@ pjsekai-scores-rs/
 - The `python` feature gate enables PyO3. Without it, the crate builds as a pure Rust library + CLI binary with no Python dependency.
 - `Score::open()` and `Score::parse_auto()` auto-detect JSON-looking custom chart input; use `Score::open_sus()` / `Score::parse()` or `Score::open_json()` / `Score::parse_json()` to force a format.
 - The `wasm` feature enables `wasm-bindgen` exports for in-memory parsing and SVG rendering. It is independent from `python` and `skia-image`; do not use local file-path APIs in browser builds.
-- The `skia-image` feature enables direct PNG/JPEG output. Python wheels omit it by default; build from source with `--features python,skia-image` when image bytes are needed.
+- The `skia-image` feature enables direct PNG/JPEG output. The default `pjsekai-scores-rs` wheel omits it; install `pjsekai-scores-rs-skia-image` (or build from source with `--features python,skia-image`) when image bytes are needed.
 - Skia image output parses CSS colors, font sizes, font weights, and `font-family`. Use `font_paths` / `font_dirs` or CLI `--font-path` / `--font-dir` when deployment fonts should not depend on the host system.
 - `--perf` reports render, layout, setup, draw, encode, copy, write, and total timings. PNG encoding is lossless and can be much slower than JPEG on large charts.
 - Direct PNG output uses the multithreaded `mtpng` fast encoder by default. Set `PJSEKAI_SCORES_PNG_ENCODER=skia` to restore the Skia encoder for diagnostics, and `PJSEKAI_SCORES_PROFILE=1` to log per-render phase timings.
 - `Drawing.raster()` renders directly into a read-only native N32 buffer. It is intended for in-process consumers that can compose the pixels without an intermediate PNG encode/decode cycle.
 - All `#[pyclass]` types are `Send + Sync` (no `Rc`/`RefCell`), satisfying Python 3.13t / 3.14t free-threaded requirements.
-- CSS is embedded at compile time via `include_str!` — no runtime file lookup required.
+- The default CSS theme is embedded at compile time via `include_str!` — no runtime file lookup required. To use another theme from `css/`, pass it as a custom stylesheet (CLI `--css`, Python `style_sheet=`); it is appended after the default theme.
 - The `generate-import-lib` PyO3 feature is enabled so the Windows wheel can be cross-compiled without a local Windows Python installation.
 
 ## SVG rendering differences from Python original

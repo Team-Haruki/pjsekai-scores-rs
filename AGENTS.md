@@ -23,7 +23,8 @@ cargo check --target wasm32-unknown-unknown --no-default-features --features was
 cargo test
 cargo test --features skia-image
 cargo test <test_name>                        # single test
-cargo clippy -- -D warnings                   # CI requires clean
+cargo clippy --all-targets -- -D warnings     # CI requires clean (default features)
+cargo clippy --all-targets --features python,skia-image -- -D warnings  # CI requires clean
 cargo fmt --all --check                       # CI requires clean
 cargo fmt                                     # auto-format
 
@@ -64,9 +65,9 @@ src/
 ├── score_json.rs   Project SEKAI custom chart JSON parser (serde_json → Score)
 ├── lyric.rs        Lyric/Word parser
 ├── rebase.rs       BPM/timing rebase transformation
-├── drawing.rs      SVG renderer — direct String building, ~1750 lines
+├── drawing.rs      SVG renderer — direct String building, ~1900 lines
 ├── skia_direct.rs  Direct Skia PNG/JPEG renderer + CSS/font handling
-├── python.rs       All PyO3 bindings (PyScore, PyDrawing, PyRebase, PyLyric, PyEvent)
+├── python.rs       All PyO3 bindings (PyFraction, PyMeta, PyEvent, PyScore, PyLyric, PyRebase, PyDrawing; PyRasterImage under skia-image)
 ├── wasm.rs         wasm-bindgen bindings (Score, Drawing, Rebase, Lyric; SVG only)
 ├── notes.rs        NoteData enum, arena index pattern (NoteIdx = usize)
 └── notes/
@@ -110,7 +111,7 @@ Accessed directly by `rebase.rs` to pre-compute bar→time mappings without borr
 `source.active_notes` iteration and `source.get_time()` (mutably populates cache) cannot coexist. Fix: clone `active_notes` and `notes` snapshots first, pre-compute all bar→time values into a `HashMap`, then iterate the snapshot.
 
 ### SVG rendering (drawing.rs)
-The SVG output is built directly into a `String` via `std::fmt::Write` — there is no DOM library. CSS themes are embedded at compile time with `include_str!`.
+The SVG output is built directly into a `String` via `std::fmt::Write` — there is no DOM library. Only the default theme (`css/default.css`) is embedded at compile time with `include_str!`; the other files in `css/` (`black`, `white`, `guess`, `color`) are not referenced by the code and are used by passing them as a custom stylesheet (CLI `--css`, Python `style_sheet=`), which is appended after the default theme.
 
 ### Drawing.svg() borrow order
 `self.build_skill_covers(score)` takes `&mut self`. The `let cfg = &self.config` binding must come **after** this mutable call, not before. Violating this causes E0502.
@@ -237,7 +238,9 @@ The files in `.github/workflows` are thin callers:
     the PyO3 bindings and the Skia build are compiled on every PR.
   - `Sonar` scans the coverage (skipped green on Dependabot/fork PRs); `Workflow lint`
     runs actionlint.
-- The aggregate job **`CI OK`** is the only required status check.
+- The aggregate job **`CI OK`** summarises the run and is what `release-gate` waits for.
+  `main` currently has no branch protection or ruleset, so no status check is enforced
+  on merge; check `CI OK` yourself before merging.
 - `release.yml` (`Release`) replaces the old `release.yml` + `release-crate.yml` +
   `release-python.yml` (which rewrote the version from the tag with `sed`). Bump
   `version` in **both** `Cargo.toml` and `pyproject.toml` (and the package's own entry in
