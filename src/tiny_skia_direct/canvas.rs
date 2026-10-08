@@ -958,8 +958,8 @@ impl TranslatedBlit<'_> {
                 let opaque_full = self.col_cov[first..first + (hi - lo) as usize]
                     .iter()
                     .all(|&c| c == 255)
-                    && a.chunks_exact(4).all(|p| p[3] == 255)
-                    && (wy == 0 || b.chunks_exact(4).all(|p| p[3] == 255));
+                    && a.as_chunks::<4>().0.iter().all(|p| p[3] == 255)
+                    && (wy == 0 || b.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
                 if opaque_full {
                     if wy == 0 {
                         out.copy_from_slice(a);

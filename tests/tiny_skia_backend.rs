@@ -99,13 +99,17 @@ fn renders_premultiplied_rgba_raster_png_and_jpeg() {
     assert!(
         raster
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3])
     );
     // Not blank: the lane, lines and notes add colours beyond the background.
     let distinct = raster
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]]))
         .collect::<std::collections::HashSet<_>>();
     assert!(distinct.len() > 16, "only {} colours", distinct.len());
@@ -147,7 +151,7 @@ mod versus_skia {
     fn rgba(pixels: &[u8], bgra: bool) -> Vec<u8> {
         let mut out = pixels.to_vec();
         if bgra {
-            for p in out.chunks_exact_mut(4) {
+            for p in out.as_chunks_mut::<4>().0.iter_mut() {
                 p.swap(0, 2);
             }
         }
@@ -157,7 +161,7 @@ mod versus_skia {
     fn similarity(a: &[u8], b: &[u8]) -> Similarity {
         assert_eq!(a.len(), b.len());
         let (mut sq, mut over_32) = (0.0_f64, 0_usize);
-        for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0.iter()) {
             let mut max = 0;
             for c in 0..3 {
                 let d = i32::from(pa[c]) - i32::from(pb[c]);

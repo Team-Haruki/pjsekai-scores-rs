@@ -57,7 +57,7 @@ fn expand(buf: &[u8], channels: usize, f: impl Fn(&[u8]) -> [u8; 4]) -> Vec<u8> 
 }
 
 fn premultiplied_pixmap(mut rgba: Vec<u8>, width: u32, height: u32) -> Option<Pixmap> {
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0.iter_mut() {
         let a = pixel[3];
         if a != 255 {
             for c in &mut pixel[..3] {
