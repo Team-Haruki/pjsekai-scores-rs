@@ -70,7 +70,7 @@ src/
 ├── drawing.rs      SVG renderer — direct String building, ~1900 lines
 ├── skia_direct.rs  Direct Skia PNG/JPEG renderer + CSS/font handling
 ├── tiny_skia_direct.rs  Experimental tiny-skia + skrifa mirror of skia_direct.rs
-├── tiny_skia_direct/    canvas.rs (SkCanvas-shaped wrapper), text.rs (skrifa fonts), codec.rs
+├── tiny_skia_direct/    canvas.rs (SkCanvas-shaped wrapper), aaa.rs + raster.rs (Skia analytic AA emulation), text.rs (skrifa fonts, glyph masks), codec.rs
 ├── python.rs       All PyO3 bindings (PyFraction, PyMeta, PyEvent, PyScore, PyLyric, PyRebase, PyDrawing; PyRasterImage under skia-image)
 ├── wasm.rs         wasm-bindgen bindings (Score, Drawing, Rebase, Lyric; SVG only)
 ├── notes.rs        NoteData enum, arena index pattern (NoteIdx = usize)

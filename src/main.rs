@@ -82,6 +82,10 @@ struct Args {
     #[arg(long, default_value_t = 90, value_parser = parse_jpeg_quality)]
     jpeg_quality: u8,
 
+    /// JPEG chroma subsampling for .jpg/.jpeg output: 420 (default) or 444
+    #[arg(long, default_value = "420", value_parser = parse_jpeg_subsampling)]
+    jpeg_subsampling: String,
+
     /// Print render/write timing statistics
     #[arg(long)]
     perf: bool,
@@ -151,7 +155,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         OutputFormat::Png => write_skia_image_output(
             &output,
             OutputFormat::Png,
-            args.jpeg_quality,
+            (args.jpeg_quality, &args.jpeg_subsampling),
             &mut drawing,
             &mut score,
             lyric.as_ref(),
@@ -159,7 +163,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         OutputFormat::Jpeg => write_skia_image_output(
             &output,
             OutputFormat::Jpeg,
-            args.jpeg_quality,
+            (args.jpeg_quality, &args.jpeg_subsampling),
             &mut drawing,
             &mut score,
             lyric.as_ref(),
@@ -220,18 +224,19 @@ fn write_svg_output(
 fn write_skia_image_output(
     output: &str,
     output_format: OutputFormat,
-    jpeg_quality: u8,
+    (jpeg_quality, jpeg_subsampling): (u8, &str),
     drawing: &mut Drawing,
     score: &mut Score,
     lyric: Option<&Lyric>,
 ) -> Result<OutputStats, Box<dyn std::error::Error>> {
-    use pjsekai_scores_rs::{SkiaImageFormat, score_to_skia_image_with_stats};
+    use pjsekai_scores_rs::{JpegSubsampling, SkiaImageFormat, score_to_skia_image_with_stats};
 
     let total_started = Instant::now();
     let skia_format = match output_format {
         OutputFormat::Png => SkiaImageFormat::Png,
-        OutputFormat::Jpeg => SkiaImageFormat::Jpeg {
+        OutputFormat::Jpeg => SkiaImageFormat::JpegSubsampled {
             quality: jpeg_quality,
+            subsampling: JpegSubsampling::parse(jpeg_subsampling).unwrap_or_default(),
         },
         OutputFormat::Svg => unreachable!("SVG output does not use Skia"),
     };
@@ -251,7 +256,7 @@ fn write_skia_image_output(
 fn write_skia_image_output(
     _output: &str,
     _output_format: OutputFormat,
-    _jpeg_quality: u8,
+    _jpeg: (u8, &str),
     _drawing: &mut Drawing,
     _score: &mut Score,
     _lyric: Option<&Lyric>,
@@ -342,6 +347,14 @@ fn output_format(output: &str) -> Result<OutputFormat, Box<dyn std::error::Error
             "unsupported output extension `{ext}`; use .svg, .png, .jpg, or .jpeg"
         )
         .into()),
+    }
+}
+
+fn parse_jpeg_subsampling(value: &str) -> Result<String, String> {
+    match value.trim() {
+        "420" | "4:2:0" => Ok("420".to_string()),
+        "444" | "4:4:4" => Ok("444".to_string()),
+        _ => Err("JPEG subsampling must be 420 or 444".to_string()),
     }
 }
 
@@ -450,6 +463,7 @@ mod tests {
             skill: false,
             music_meta: None,
             jpeg_quality: 90,
+            jpeg_subsampling: "420".to_string(),
             perf: false,
             output: output.map(|path| path.to_string_lossy().into_owned()),
             generator: None,

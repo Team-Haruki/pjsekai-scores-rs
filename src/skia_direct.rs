@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mtpng::encoder::{Encoder as MtpngEncoder, Options as MtpngOptions};
 use mtpng::{ColorType as MtpngColorType, CompressionLevel, Header as MtpngHeader};
+use skia_safe::jpeg_encoder;
 use skia_safe::{
     AlphaType, Color, Color4f, ColorType, Data, EncodedImageFormat, FilterMode, Font, FontMgr,
     FontStyle, Image, ImageInfo, Paint, PaintStyle, PathBuilder, Point, Rect, SamplingOptions,
@@ -76,7 +77,38 @@ pub enum SkiaDirectError {
 #[derive(Debug, Clone, Copy)]
 pub enum SkiaImageFormat {
     Png,
-    Jpeg { quality: u8 },
+    /// Baseline JPEG with 4:2:0 chroma subsampling.
+    Jpeg {
+        quality: u8,
+    },
+    /// Baseline JPEG with the given chroma subsampling.
+    JpegSubsampled {
+        quality: u8,
+        subsampling: JpegSubsampling,
+    },
+}
+
+/// Chroma subsampling of JPEG output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum JpegSubsampling {
+    /// Chroma at half resolution in both directions: libjpeg's and Skia's
+    /// default, the smallest files.
+    #[default]
+    Yuv420,
+    /// Chroma at full resolution: sharper coloured edges (thin lines, small
+    /// coloured text), larger files.
+    Yuv444,
+}
+
+impl JpegSubsampling {
+    /// Parses `"420"`/`"4:2:0"` or `"444"`/`"4:4:4"`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "420" | "4:2:0" => Some(Self::Yuv420),
+            "444" | "4:4:4" => Some(Self::Yuv444),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +232,24 @@ pub fn score_to_skia_jpeg(
     quality: u8,
 ) -> Result<Vec<u8>, SkiaDirectError> {
     score_to_skia_image(drawing, score, lyric, SkiaImageFormat::Jpeg { quality })
+}
+
+pub fn score_to_skia_jpeg_with_subsampling(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+    quality: u8,
+    subsampling: JpegSubsampling,
+) -> Result<Vec<u8>, SkiaDirectError> {
+    score_to_skia_image(
+        drawing,
+        score,
+        lyric,
+        SkiaImageFormat::JpegSubsampled {
+            quality,
+            subsampling,
+        },
+    )
 }
 
 pub fn score_to_skia_image(
@@ -369,12 +419,22 @@ fn score_to_skia_image_with_png_encoder(
                 png_encoder.name(),
             )
         }
-        SkiaImageFormat::Jpeg { quality } => {
+        SkiaImageFormat::Jpeg { quality } | SkiaImageFormat::JpegSubsampled { quality, .. } => {
+            let subsampling = match format {
+                SkiaImageFormat::JpegSubsampled { subsampling, .. } => subsampling,
+                _ => JpegSubsampling::Yuv420,
+            };
             let image = surface.image_snapshot();
             let encode_started = Instant::now();
-            #[allow(deprecated)]
-            let data = image
-                .encode_to_data_with_quality(EncodedImageFormat::JPEG, quality.min(100) as u32)
+            let options = jpeg_encoder::Options {
+                quality: u32::from(quality.min(100)),
+                downsample: match subsampling {
+                    JpegSubsampling::Yuv420 => jpeg_encoder::Downsample::BothDirections,
+                    JpegSubsampling::Yuv444 => jpeg_encoder::Downsample::No,
+                },
+                ..jpeg_encoder::Options::default()
+            };
+            let data = jpeg_encoder::encode_image(None, &image, &options)
                 .ok_or(SkiaDirectError::Encode)?;
             let encode_duration = encode_started.elapsed();
             let copy_started = Instant::now();

@@ -1,9 +1,12 @@
 //! Image decoding (PNG via `png`, JPEG via `zune-jpeg`) into premultiplied
-//! tiny-skia pixmaps, and PNG/JPEG encoding of the rendered page.
+//! tiny-skia pixmaps, and PNG (mtpng) / JPEG (mozjpeg-rs) encoding of the
+//! rendered page.
 
 use mtpng::encoder::{Encoder as MtpngEncoder, Options as MtpngOptions};
 use mtpng::{ColorType as MtpngColorType, CompressionLevel, Header as MtpngHeader};
 use tiny_skia::{IntSize, Pixmap, PixmapRef, PremultipliedColorU8};
+
+use super::JpegSubsampling;
 
 /// Decodes PNG or JPEG bytes into a premultiplied RGBA pixmap, like
 /// `SkImage::MakeFromEncoded` does for the formats the renderer needs.
@@ -125,21 +128,24 @@ pub(super) fn encode_png_reference(pixmap: PixmapRef<'_>) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Baseline JPEG with 4:2:0 chroma subsampling and optimized Huffman tables,
-/// matching what Skia's libjpeg-turbo encoder writes (byte-for-byte the same size
-/// as libjpeg-turbo with `optimize_coding` on the fixture). Like Skia's default
-/// `AlphaOption::kIgnore`, the premultiplied colour is encoded and alpha dropped.
-pub(super) fn encode_jpeg(pixmap: PixmapRef<'_>, quality: u8) -> Option<Vec<u8>> {
-    use jpeg_encoder::{ColorType, Encoder, SamplingFactor};
-
-    let width = u16::try_from(pixmap.width()).ok()?;
-    let height = u16::try_from(pixmap.height()).ok()?;
-    let mut out = Vec::new();
-    let mut encoder = Encoder::new(&mut out, quality.clamp(1, 100));
-    encoder.set_sampling_factor(SamplingFactor::F_2_2);
-    encoder.set_optimized_huffman_tables(true);
-    encoder
-        .encode(pixmap.data(), width, height, ColorType::Rgba)
-        .ok()?;
-    Some(out)
+/// Baseline JPEG with optimized Huffman tables through mozjpeg-rs in its
+/// libjpeg-turbo-compatible mode (Annex K quantization tables, no trellis or
+/// deringing): the scan data matches what libjpeg-turbo, and so Skia, writes.
+/// Like Skia's default `AlphaOption::kIgnore`, the premultiplied colour is
+/// encoded and alpha dropped.
+pub(super) fn encode_jpeg(
+    pixmap: PixmapRef<'_>,
+    quality: u8,
+    subsampling: JpegSubsampling,
+) -> Option<Vec<u8>> {
+    mozjpeg_rs::Encoder::fastest()
+        .quant_tables(mozjpeg_rs::QuantTableIdx::JpegAnnexK)
+        .quality(quality.clamp(1, 100))
+        .subsampling(match subsampling {
+            JpegSubsampling::Yuv420 => mozjpeg_rs::Subsampling::S420,
+            JpegSubsampling::Yuv444 => mozjpeg_rs::Subsampling::S444,
+        })
+        .optimize_huffman(true)
+        .encode_rgba(pixmap.data(), pixmap.width(), pixmap.height())
+        .ok()
 }

@@ -172,11 +172,20 @@ fn render_jpeg_bytes(
     score: &mut Score,
     lyric: Option<&Lyric>,
     quality: u8,
+    subsampling: Option<&str>,
 ) -> PyResult<Vec<u8>> {
     let quality = checked_jpeg_quality(quality)?;
-    crate::score_to_skia_jpeg(drawing, score, lyric, quality).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to render JPEG: {e}"))
-    })
+    let subsampling = match subsampling {
+        None => crate::JpegSubsampling::default(),
+        Some(value) => crate::JpegSubsampling::parse(value).ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "jpeg_subsampling must be \"420\" (4:2:0) or \"444\" (4:4:4)",
+            )
+        })?,
+    };
+    crate::score_to_skia_jpeg_with_subsampling(drawing, score, lyric, quality, subsampling).map_err(
+        |e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to render JPEG: {e}")),
+    )
 }
 
 #[cfg(not(any(feature = "skia-image", feature = "tiny-skia-image")))]
@@ -196,6 +205,7 @@ fn render_jpeg_bytes(
     _score: &mut Score,
     _lyric: Option<&Lyric>,
     _quality: u8,
+    _subsampling: Option<&str>,
 ) -> PyResult<Vec<u8>> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
         "PNG/JPEG output requires the `skia-image` feature; install `pjsekai-scores-rs-skia-image` or build with `--features python,skia-image` (or `python,tiny-skia-image`)",
@@ -886,19 +896,26 @@ impl PyDrawing {
     }
 
     /// Generate JPEG bytes from a score via direct Skia rendering
-    #[pyo3(signature = (score=None, lyric=None, jpeg_quality=90))]
+    #[pyo3(signature = (score=None, lyric=None, jpeg_quality=90, jpeg_subsampling=None))]
     fn jpg<'py>(
         &mut self,
         py: Python<'py>,
         score: Option<PyRefMut<'_, PyScore>>,
         lyric: Option<PyRef<'_, PyLyric>>,
         jpeg_quality: u8,
+        jpeg_subsampling: Option<&str>,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let lyric_override = lyric.map(|lyric| lyric.inner.clone());
 
         let bytes = if let Some(mut score) = score {
             let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
-            render_jpeg_bytes(&mut self.inner, &mut score.inner, lyric_ref, jpeg_quality)?
+            render_jpeg_bytes(
+                &mut self.inner,
+                &mut score.inner,
+                lyric_ref,
+                jpeg_quality,
+                jpeg_subsampling,
+            )?
         } else {
             let mut stored_score = self.stored_score.clone().ok_or_else(|| {
                 pyo3::exceptions::PyTypeError::new_err(
@@ -906,22 +923,29 @@ impl PyDrawing {
                 )
             })?;
             let lyric_ref = lyric_override.as_ref().or(self.stored_lyric.as_ref());
-            render_jpeg_bytes(&mut self.inner, &mut stored_score, lyric_ref, jpeg_quality)?
+            render_jpeg_bytes(
+                &mut self.inner,
+                &mut stored_score,
+                lyric_ref,
+                jpeg_quality,
+                jpeg_subsampling,
+            )?
         };
 
         Ok(PyBytes::new(py, &bytes))
     }
 
     /// Generate JPEG bytes from a score via direct Skia rendering
-    #[pyo3(signature = (score=None, lyric=None, jpeg_quality=90))]
+    #[pyo3(signature = (score=None, lyric=None, jpeg_quality=90, jpeg_subsampling=None))]
     fn jpeg<'py>(
         &mut self,
         py: Python<'py>,
         score: Option<PyRefMut<'_, PyScore>>,
         lyric: Option<PyRef<'_, PyLyric>>,
         jpeg_quality: u8,
+        jpeg_subsampling: Option<&str>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        self.jpg(py, score, lyric, jpeg_quality)
+        self.jpg(py, score, lyric, jpeg_quality, jpeg_subsampling)
     }
 
     #[getter]
@@ -1040,7 +1064,7 @@ fn sus_to_png<'py>(
 
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90, jpeg_subsampling=None))]
 #[allow(clippy::too_many_arguments)]
 fn sus_to_jpg<'py>(
     py: Python<'py>,
@@ -1057,6 +1081,7 @@ fn sus_to_jpg<'py>(
     font_paths: Option<Vec<String>>,
     font_dirs: Option<Vec<String>>,
     jpeg_quality: u8,
+    jpeg_subsampling: Option<&str>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     let mut score = open_score_for_render(sus_path, rebase_json)?;
     let lyric = lyric_content.map(Lyric::load);
@@ -1071,13 +1096,19 @@ fn sus_to_jpg<'py>(
         font_paths,
         font_dirs,
     )?;
-    let bytes = render_jpeg_bytes(&mut drawing, &mut score, lyric.as_ref(), jpeg_quality)?;
+    let bytes = render_jpeg_bytes(
+        &mut drawing,
+        &mut score,
+        lyric.as_ref(),
+        jpeg_quality,
+        jpeg_subsampling,
+    )?;
     Ok(PyBytes::new(py, &bytes))
 }
 
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
+#[pyo3(signature = (sus_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90, jpeg_subsampling=None))]
 #[allow(clippy::too_many_arguments)]
 fn sus_to_jpeg<'py>(
     py: Python<'py>,
@@ -1094,6 +1125,7 @@ fn sus_to_jpeg<'py>(
     font_paths: Option<Vec<String>>,
     font_dirs: Option<Vec<String>>,
     jpeg_quality: u8,
+    jpeg_subsampling: Option<&str>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     sus_to_jpg(
         py,
@@ -1110,6 +1142,7 @@ fn sus_to_jpeg<'py>(
         font_paths,
         font_dirs,
         jpeg_quality,
+        jpeg_subsampling,
     )
 }
 
@@ -1185,7 +1218,7 @@ fn score_to_png<'py>(
 
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90, jpeg_subsampling=None))]
 #[allow(clippy::too_many_arguments)]
 fn score_to_jpg<'py>(
     py: Python<'py>,
@@ -1202,6 +1235,7 @@ fn score_to_jpg<'py>(
     font_paths: Option<Vec<String>>,
     font_dirs: Option<Vec<String>>,
     jpeg_quality: u8,
+    jpeg_subsampling: Option<&str>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     sus_to_jpg(
         py,
@@ -1218,12 +1252,13 @@ fn score_to_jpg<'py>(
         font_paths,
         font_dirs,
         jpeg_quality,
+        jpeg_subsampling,
     )
 }
 
 /// Convenience function: parse a score file and generate JPEG bytes in one call
 #[pyfunction]
-#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90))]
+#[pyo3(signature = (score_path, note_host=None, style_sheet=None, rebase_json=None, lyric_content=None, skill=false, music_meta=None, target_segment_seconds=None, generator=None, note_asset_extension=None, font_paths=None, font_dirs=None, jpeg_quality=90, jpeg_subsampling=None))]
 #[allow(clippy::too_many_arguments)]
 fn score_to_jpeg<'py>(
     py: Python<'py>,
@@ -1240,6 +1275,7 @@ fn score_to_jpeg<'py>(
     font_paths: Option<Vec<String>>,
     font_dirs: Option<Vec<String>>,
     jpeg_quality: u8,
+    jpeg_subsampling: Option<&str>,
 ) -> PyResult<Bound<'py, PyBytes>> {
     score_to_jpg(
         py,
@@ -1256,6 +1292,7 @@ fn score_to_jpeg<'py>(
         font_paths,
         font_dirs,
         jpeg_quality,
+        jpeg_subsampling,
     )
 }
 

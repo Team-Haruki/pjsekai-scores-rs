@@ -32,15 +32,17 @@ pub use score_json::ScoreJsonError;
 // same names under its own module path.
 #[cfg(feature = "skia-image")]
 pub use skia_direct::{
-    PngEncoder, SkiaDirectError, SkiaImageFormat, SkiaImageOutput, SkiaRasterColorType,
-    SkiaRasterOutput, SkiaRenderStats, score_to_skia_image, score_to_skia_image_with_stats,
-    score_to_skia_jpeg, score_to_skia_png, score_to_skia_png_with_encoder, score_to_skia_raster,
+    JpegSubsampling, PngEncoder, SkiaDirectError, SkiaImageFormat, SkiaImageOutput,
+    SkiaRasterColorType, SkiaRasterOutput, SkiaRenderStats, score_to_skia_image,
+    score_to_skia_image_with_stats, score_to_skia_jpeg, score_to_skia_jpeg_with_subsampling,
+    score_to_skia_png, score_to_skia_png_with_encoder, score_to_skia_raster,
 };
 #[cfg(all(feature = "tiny-skia-image", not(feature = "skia-image")))]
 pub use tiny_skia_direct::{
-    PngEncoder, SkiaDirectError, SkiaImageFormat, SkiaImageOutput, SkiaRasterColorType,
-    SkiaRasterOutput, SkiaRenderStats, score_to_skia_image, score_to_skia_image_with_stats,
-    score_to_skia_jpeg, score_to_skia_png, score_to_skia_png_with_encoder, score_to_skia_raster,
+    JpegSubsampling, PngEncoder, SkiaDirectError, SkiaImageFormat, SkiaImageOutput,
+    SkiaRasterColorType, SkiaRasterOutput, SkiaRenderStats, score_to_skia_image,
+    score_to_skia_image_with_stats, score_to_skia_jpeg, score_to_skia_jpeg_with_subsampling,
+    score_to_skia_png, score_to_skia_png_with_encoder, score_to_skia_raster,
 };
 
 /// The backend behind the crate-level raster API (`"skia"` or `"tiny-skia"`).

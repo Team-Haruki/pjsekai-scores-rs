@@ -63,6 +63,8 @@ Options:
       --music-meta <MUSIC_META>  Music metadata JSON or JSON file path for skill score overlay
       --jpeg-quality <JPEG_QUALITY>
                                  JPEG quality for .jpg/.jpeg output (0-100) [default: 90]
+      --jpeg-subsampling <JPEG_SUBSAMPLING>
+                                 JPEG chroma subsampling for .jpg/.jpeg output: 420 (default) or 444 [default: 420]
       --perf                     Print render/write timing statistics
   -o, --output <OUTPUT>          Output file path (.svg, .png, .jpg, or .jpeg)
       --generator <GENERATOR>    Generator name shown in the SVG subtitle
@@ -392,6 +394,8 @@ svg_string = drawing.svg(score, lyric=lyric)
 png_bytes = drawing.png(score)
 jpg_bytes = drawing.jpg(score, jpeg_quality=90)
 jpeg_bytes = drawing.jpeg(score, jpeg_quality=90)
+# 4:4:4 chroma keeps thin coloured lines and small coloured text sharper ("420" is the default).
+jpeg_444 = drawing.jpeg(score, jpeg_quality=90, jpeg_subsampling="444")
 
 # Native N32 premultiplied pixels for zero-copy extension-to-extension composition.
 raster = drawing.raster(score)
@@ -531,7 +535,7 @@ pjsekai-scores-rs/
     ├── drawing.rs      # SVG renderer (direct String building)
     ├── skia_direct.rs  # Direct Skia PNG/JPEG renderer
     ├── tiny_skia_direct.rs # Experimental pure-Rust mirror of skia_direct.rs (tiny-skia + skrifa)
-    ├── tiny_skia_direct/   # canvas.rs, text.rs (skrifa fonts), codec.rs (png/zune-jpeg/jpeg-encoder)
+    ├── tiny_skia_direct/   # canvas.rs, aaa.rs + raster.rs (Skia-style AA), text.rs (skrifa fonts), codec.rs (png/zune-jpeg/mozjpeg-rs)
     ├── python.rs       # PyO3 bindings (Fraction, Meta, Event, Score, Lyric, Rebase, Drawing; RasterImage with skia-image)
     ├── wasm.rs         # wasm-bindgen bindings (Score, Drawing, Rebase, Lyric)
     ├── notes.rs        # NoteData enum + NoteBase + arena index pattern

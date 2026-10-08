@@ -90,7 +90,38 @@ pub const BACKEND_NAME: &str = "tiny-skia";
 #[derive(Debug, Clone, Copy)]
 pub enum SkiaImageFormat {
     Png,
-    Jpeg { quality: u8 },
+    /// Baseline JPEG with 4:2:0 chroma subsampling.
+    Jpeg {
+        quality: u8,
+    },
+    /// Baseline JPEG with the given chroma subsampling.
+    JpegSubsampled {
+        quality: u8,
+        subsampling: JpegSubsampling,
+    },
+}
+
+/// Chroma subsampling of JPEG output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum JpegSubsampling {
+    /// Chroma at half resolution in both directions: libjpeg's and Skia's
+    /// default, the smallest files.
+    #[default]
+    Yuv420,
+    /// Chroma at full resolution: sharper coloured edges (thin lines, small
+    /// coloured text), larger files.
+    Yuv444,
+}
+
+impl JpegSubsampling {
+    /// Parses `"420"`/`"4:2:0"` or `"444"`/`"4:4:4"`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "420" | "4:2:0" => Some(Self::Yuv420),
+            "444" | "4:4:4" => Some(Self::Yuv444),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +248,24 @@ pub fn score_to_skia_jpeg(
     quality: u8,
 ) -> Result<Vec<u8>, SkiaDirectError> {
     score_to_skia_image(drawing, score, lyric, SkiaImageFormat::Jpeg { quality })
+}
+
+pub fn score_to_skia_jpeg_with_subsampling(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+    quality: u8,
+    subsampling: JpegSubsampling,
+) -> Result<Vec<u8>, SkiaDirectError> {
+    score_to_skia_image(
+        drawing,
+        score,
+        lyric,
+        SkiaImageFormat::JpegSubsampled {
+            quality,
+            subsampling,
+        },
+    )
 }
 
 pub fn score_to_skia_image(
@@ -364,9 +413,17 @@ fn score_to_skia_image_with_png_encoder(
             "png",
         ),
         SkiaImageFormat::Jpeg { quality } => (
-            codec::encode_jpeg(surface.as_ref(), quality.min(100))
+            codec::encode_jpeg(surface.as_ref(), quality.min(100), JpegSubsampling::Yuv420)
                 .ok_or(SkiaDirectError::Encode)?,
-            "jpeg-encoder",
+            "mozjpeg-rs",
+        ),
+        SkiaImageFormat::JpegSubsampled {
+            quality,
+            subsampling,
+        } => (
+            codec::encode_jpeg(surface.as_ref(), quality.min(100), subsampling)
+                .ok_or(SkiaDirectError::Encode)?,
+            "mozjpeg-rs",
         ),
     };
     let (encode_duration, copy_duration) = (encode_started.elapsed(), Duration::ZERO);
@@ -3739,6 +3796,7 @@ fn format_g(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::JpegSubsampling;
     use super::{
         SkiaRasterColorType, canvas::Canvas, canvas::Paint, canvas::Rect, codec, parse_css_body,
         parse_font_families, score_to_skia_raster,
@@ -3769,15 +3827,47 @@ mod tests {
 
     #[test]
     fn jpeg_encoder_writes_a_baseline_jpeg() {
-        let mut surface = Pixmap::new(16, 8).expect("pixmap");
-        surface.fill(Color::from_rgba8(200, 40, 90, 255));
-        let encoded = codec::encode_jpeg(surface.as_ref(), 90).expect("jpeg encode");
-        assert!(encoded.starts_with(&[0xff, 0xd8]));
-        let decoded = codec::decode_image(&encoded).expect("JPEG decode");
-        assert_eq!((decoded.width(), decoded.height()), (16, 8));
-        let pixel = decoded.pixel(8, 4).expect("pixel");
-        assert!((i32::from(pixel.red()) - 200).abs() <= 4);
-        assert_eq!(pixel.alpha(), 255);
+        // A gradient with detail in every MCU, so a scan that a decoder reads
+        // wrongly (as zune-jpeg did with jpeg-encoder's three-scan optimized
+        // output) cannot pass.
+        let (w, h) = (67, 45);
+        let mut surface = Pixmap::new(w, h).expect("pixmap");
+        for (i, px) in surface.pixels_mut().iter_mut().enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            *px = tiny_skia::ColorU8::from_rgba(
+                (x * 3) as u8,
+                (y * 5) as u8,
+                ((x + y) * 2) as u8,
+                255,
+            )
+            .premultiply();
+        }
+        for subsampling in [JpegSubsampling::Yuv420, JpegSubsampling::Yuv444] {
+            let encoded =
+                codec::encode_jpeg(surface.as_ref(), 90, subsampling).expect("jpeg encode");
+            assert!(encoded.starts_with(&[0xff, 0xd8]));
+            // Exactly one scan (baseline, interleaved).
+            assert_eq!(encoded.windows(2).filter(|m| *m == [0xff, 0xda]).count(), 1);
+            let decoded = codec::decode_image(&encoded).expect("JPEG decode");
+            assert_eq!((decoded.width(), decoded.height()), (w, h));
+            let mut max = 0;
+            for (a, b) in surface.pixels().iter().zip(decoded.pixels()) {
+                for (u, v) in [
+                    (a.red(), b.red()),
+                    (a.green(), b.green()),
+                    (a.blue(), b.blue()),
+                ] {
+                    max = max.max((i32::from(u) - i32::from(v)).abs());
+                }
+                assert_eq!(b.alpha(), 255);
+            }
+            assert!(max <= 24, "{subsampling:?}: max channel error {max}");
+        }
+        assert_eq!(
+            JpegSubsampling::parse("4:4:4"),
+            Some(JpegSubsampling::Yuv444)
+        );
+        assert_eq!(JpegSubsampling::parse("422"), None);
     }
 
     #[test]

@@ -243,12 +243,14 @@ class Drawing:
         score: Optional[Score] = ...,
         lyric: Optional[Lyric] = ...,
         jpeg_quality: int = ...,
+        jpeg_subsampling: str | None = ...,
     ) -> bytes: ...
     def jpeg(
         self,
         score: Optional[Score] = ...,
         lyric: Optional[Lyric] = ...,
         jpeg_quality: int = ...,
+        jpeg_subsampling: str | None = ...,
     ) -> bytes: ...
 
     @property
@@ -321,6 +323,7 @@ def sus_to_jpg(
     font_paths: Optional[Sequence[str]] = ...,
     font_dirs: Optional[Sequence[str]] = ...,
     jpeg_quality: int = ...,
+        jpeg_subsampling: str | None = ...,
 ) -> bytes: ...
 
 
@@ -338,6 +341,7 @@ def sus_to_jpeg(
     font_paths: Optional[Sequence[str]] = ...,
     font_dirs: Optional[Sequence[str]] = ...,
     jpeg_quality: int = ...,
+        jpeg_subsampling: str | None = ...,
 ) -> bytes: ...
 
 
@@ -387,6 +391,7 @@ def score_to_jpg(
     font_paths: Optional[Sequence[str]] = ...,
     font_dirs: Optional[Sequence[str]] = ...,
     jpeg_quality: int = ...,
+        jpeg_subsampling: str | None = ...,
 ) -> bytes: ...
 
 
@@ -404,4 +409,5 @@ def score_to_jpeg(
     font_paths: Optional[Sequence[str]] = ...,
     font_dirs: Optional[Sequence[str]] = ...,
     jpeg_quality: int = ...,
+        jpeg_subsampling: str | None = ...,
 ) -> bytes: ...
