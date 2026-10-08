@@ -211,12 +211,12 @@ fn write_svg_output(
         render,
         write,
         total: total_started.elapsed(),
-        #[cfg(feature = "skia-image")]
+        #[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
         skia: None,
     })
 }
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 fn write_skia_image_output(
     output: &str,
     output_format: OutputFormat,
@@ -247,7 +247,7 @@ fn write_skia_image_output(
     })
 }
 
-#[cfg(not(feature = "skia-image"))]
+#[cfg(not(any(feature = "skia-image", feature = "tiny-skia-image")))]
 fn write_skia_image_output(
     _output: &str,
     _output_format: OutputFormat,
@@ -256,19 +256,22 @@ fn write_skia_image_output(
     _score: &mut Score,
     _lyric: Option<&Lyric>,
 ) -> Result<OutputStats, Box<dyn std::error::Error>> {
-    Err("PNG/JPEG output requires building with `--features skia-image`".into())
+    Err(
+        "PNG/JPEG output requires building with `--features skia-image` (or `tiny-skia-image`)"
+            .into(),
+    )
 }
 
 struct OutputStats {
     render: Duration,
     write: Duration,
     total: Duration,
-    #[cfg(feature = "skia-image")]
+    #[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
     skia: Option<pjsekai_scores_rs::SkiaRenderStats>,
 }
 
 fn print_output_stats(stats: &OutputStats) {
-    #[cfg(feature = "skia-image")]
+    #[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
     if let Some(skia) = stats.skia {
         eprintln!(
             "Timing: render {} (layout {}, setup {}, draw {}, encode {}, copy {}), write {}, total {}",
@@ -568,7 +571,7 @@ mod tests {
 
     #[test]
     fn reports_raster_requirement_without_skia_feature() {
-        #[cfg(not(feature = "skia-image"))]
+        #[cfg(not(any(feature = "skia-image", feature = "tiny-skia-image")))]
         {
             let dir = TestDir::new();
             let score_path = dir.path("chart.sus");

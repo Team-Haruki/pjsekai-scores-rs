@@ -16,12 +16,14 @@ The original Python implementation lives at `../scores/` and is the reference fo
 # Rust only (crate + CLI)
 cargo build --release
 cargo build --release --features skia-image
+cargo build --release --features tiny-skia-image   # experimental pure-Rust backend
 cargo check
 cargo check --features python
 cargo check --features 'python skia-image'
 cargo check --target wasm32-unknown-unknown --no-default-features --features wasm --lib
 cargo test
 cargo test --features skia-image
+cargo test --features skia-image,tiny-skia-image   # includes tiny-skia vs Skia similarity tests
 cargo test <test_name>                        # single test
 cargo clippy --all-targets -- -D warnings     # CI requires clean (default features)
 cargo clippy --all-targets --features python,skia-image -- -D warnings  # CI requires clean
@@ -67,6 +69,8 @@ src/
 ├── rebase.rs       BPM/timing rebase transformation
 ├── drawing.rs      SVG renderer — direct String building, ~1900 lines
 ├── skia_direct.rs  Direct Skia PNG/JPEG renderer + CSS/font handling
+├── tiny_skia_direct.rs  Experimental tiny-skia + skrifa mirror of skia_direct.rs
+├── tiny_skia_direct/    canvas.rs (SkCanvas-shaped wrapper), text.rs (skrifa fonts), codec.rs
 ├── python.rs       All PyO3 bindings (PyFraction, PyMeta, PyEvent, PyScore, PyLyric, PyRebase, PyDrawing; PyRasterImage under skia-image)
 ├── wasm.rs         wasm-bindgen bindings (Score, Drawing, Rebase, Lyric; SVG only)
 ├── notes.rs        NoteData enum, arena index pattern (NoteIdx = usize)
@@ -124,6 +128,11 @@ Custom fonts enter through `DrawingConfig.font_paths` / `font_dirs`, CLI `--font
 `skia_direct.rs` registers custom typefaces by localized family name, Skia family name, and PostScript name, all normalized for lookup. This lets CSS names such as `FOT-RodinNTLG Pro DB` and `Source Han Sans SC` match bundled fonts. When CJK text is present, a candidate typeface must cover the required glyphs before it is selected.
 
 Custom font data is cached per process in `CUSTOM_FONT_CACHE`, keyed by sorted font path, modified time, and file size. Keep that key stable when changing font loading; stale font cache bugs are harder to diagnose than a small setup cost.
+
+### tiny-skia backend (`tiny-skia-image`)
+`tiny_skia_direct.rs` mirrors `skia_direct.rs` function by function (diff the two files to review it); only `canvas.rs`, `text.rs` and `codec.rs` differ in substance. When a rendering change lands in `skia_direct.rs`, port it to the mirror in the same PR. With both features on, the crate-level `score_to_skia_*` API stays on Skia; with only `tiny-skia-image`, the same names (and Python `png()`/`jpeg()`/`raster()`) use tiny-skia. `RASTER_BACKEND` tells which one is active.
+
+Fidelity work is Linux-Skia-specific on purpose: rounded (hinted) advances, glyph origins snapped to 1/4 px on the advance axis, skrifa hinting, Skia's fake-bold outset (`size * lerp(1/24, 1/32)` between 9 and 36 px) and Skia's A8 glyph gamma pre-blend (sRGB, contrast 0.5). Path fills are rasterized at 4x horizontal resolution on top of tiny-skia's own supersampling, and translate-only image draws use a custom bilinear blit because tiny-skia would switch them to nearest-neighbour. Keep `tests/tiny_skia_backend.rs` green; set `PJSEKAI_SCORES_FIXTURE_DATA` / `PJSEKAI_SCORES_FIXTURE_FONTS` to also run the Drawing API chart fixture.
 
 ### Raw strings with `href="#`
 The literal `href="#` contains `"#` which prematurely closes `r#"..."#` raw strings. Use `r##"..."##` for any format string containing this pattern.
@@ -230,12 +239,14 @@ The files in `.github/workflows` are thin callers:
 - `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual
   dispatch:
   - `Rust` (`rust-ci`): `cargo fmt --check`; clippy `--all-targets -D warnings` for the
-    default features and for `--features python,skia-image` (fontconfig/freetype from
-    apt); `cargo check --target wasm32-unknown-unknown --no-default-features --features
-    wasm`; the tests run once under `cargo llvm-cov`.
+    default features, `--features python,skia-image` (fontconfig/freetype from apt) and
+    `--features python,tiny-skia-image`; `cargo check --target wasm32-unknown-unknown
+    --no-default-features --features wasm`; the tests run under `cargo llvm-cov` for the
+    default features and for `--features skia-image,tiny-skia-image`.
   - `Wheel smoke` (`maturin-wheels`): one linux-x64 wheel per package
-    (`pjsekai-scores-rs` and `pjsekai-scores-rs-skia-image`), installed and imported, so
-    the PyO3 bindings and the Skia build are compiled on every PR.
+    (`pjsekai-scores-rs` and `pjsekai-scores-rs-skia-image`, plus an unpublished
+    `pjsekai-scores-rs-tiny-skia-image` smoke build), installed and imported, so the PyO3
+    bindings and both raster backends are compiled on every PR.
   - `Sonar` scans the coverage (skipped green on Dependabot/fork PRs); `Workflow lint`
     runs actionlint.
 - The aggregate job **`CI OK`** summarises the run and is what `release-gate` waits for.

@@ -530,6 +530,8 @@ pjsekai-scores-rs/
     ├── rebase.rs       # BPM/timing rebase transformation
     ├── drawing.rs      # SVG renderer (direct String building)
     ├── skia_direct.rs  # Direct Skia PNG/JPEG renderer
+    ├── tiny_skia_direct.rs # Experimental pure-Rust mirror of skia_direct.rs (tiny-skia + skrifa)
+    ├── tiny_skia_direct/   # canvas.rs, text.rs (skrifa fonts), codec.rs (png/zune-jpeg/jpeg-encoder)
     ├── python.rs       # PyO3 bindings (Fraction, Meta, Event, Score, Lyric, Rebase, Drawing; RasterImage with skia-image)
     ├── wasm.rs         # wasm-bindgen bindings (Score, Drawing, Rebase, Lyric)
     ├── notes.rs        # NoteData enum + NoteBase + arena index pattern
@@ -546,6 +548,7 @@ pjsekai-scores-rs/
 - `Score::open()` and `Score::parse_auto()` auto-detect JSON-looking custom chart input; use `Score::open_sus()` / `Score::parse()` or `Score::open_json()` / `Score::parse_json()` to force a format.
 - The `wasm` feature enables `wasm-bindgen` exports for in-memory parsing and SVG rendering. It is independent from `python` and `skia-image`; do not use local file-path APIs in browser builds.
 - The `skia-image` feature enables direct PNG/JPEG output. The default `pjsekai-scores-rs` wheel omits it; install `pjsekai-scores-rs-skia-image` (or build from source with `--features python,skia-image`) when image bytes are needed.
+- The experimental `tiny-skia-image` feature provides the same PNG/JPEG/`raster()` API on a pure-Rust backend (tiny-skia + skrifa): no C++ toolchain, no prebuilt Skia download, no fontconfig/freetype, and it builds as a static musl binary. When `skia-image` is also enabled, Skia stays behind the crate-level API and the tiny-skia renderer is reachable as `pjsekai_scores_rs::tiny_skia_direct`. It only uses fonts from `font_paths` / `font_dirs` (no system font lookup), its raster is always `rgba8888` premultiplied, and the Python module reports the active backend in `pjsekai_scores_rs.RASTER_BACKEND`. Set `PJSEKAI_SCORES_TINY_SKIA_HINTING=0` to draw unhinted glyph outlines.
 - Skia image output parses CSS colors, font sizes, font weights, and `font-family`. Use `font_paths` / `font_dirs` or CLI `--font-path` / `--font-dir` when deployment fonts should not depend on the host system.
 - `--perf` reports render, layout, setup, draw, encode, copy, write, and total timings. PNG encoding is lossless and can be much slower than JPEG on large charts.
 - Direct PNG output uses the multithreaded `mtpng` fast encoder by default. Set `PJSEKAI_SCORES_PNG_ENCODER=skia` to restore the Skia encoder for diagnostics, and `PJSEKAI_SCORES_PROFILE=1` to log per-render phase timings.

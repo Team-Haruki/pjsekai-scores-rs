@@ -5,16 +5,16 @@ use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 use pyo3::types::PyModule;
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 use std::ffi::{c_char, c_void};
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 use std::os::raw::c_int;
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 use std::ptr;
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 use pyo3::exceptions::PyBufferError;
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 use pyo3::ffi;
 
 use crate::drawing::{Drawing, MusicMeta};
@@ -144,7 +144,7 @@ fn drawing_for_render(
     Ok(drawing)
 }
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 fn render_png_bytes(
     drawing: &mut Drawing,
     score: &mut Score,
@@ -155,7 +155,7 @@ fn render_png_bytes(
     })
 }
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 fn render_raster(
     drawing: &mut Drawing,
     score: &mut Score,
@@ -166,7 +166,7 @@ fn render_raster(
     })
 }
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 fn render_jpeg_bytes(
     drawing: &mut Drawing,
     score: &mut Score,
@@ -179,18 +179,18 @@ fn render_jpeg_bytes(
     })
 }
 
-#[cfg(not(feature = "skia-image"))]
+#[cfg(not(any(feature = "skia-image", feature = "tiny-skia-image")))]
 fn render_png_bytes(
     _drawing: &mut Drawing,
     _score: &mut Score,
     _lyric: Option<&Lyric>,
 ) -> PyResult<Vec<u8>> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
-        "PNG/JPEG output requires the `skia-image` feature; install `pjsekai-scores-rs-skia-image` or build with `--features python,skia-image`",
+        "PNG/JPEG output requires the `skia-image` feature; install `pjsekai-scores-rs-skia-image` or build with `--features python,skia-image` (or `python,tiny-skia-image`)",
     ))
 }
 
-#[cfg(not(feature = "skia-image"))]
+#[cfg(not(any(feature = "skia-image", feature = "tiny-skia-image")))]
 fn render_jpeg_bytes(
     _drawing: &mut Drawing,
     _score: &mut Score,
@@ -198,11 +198,11 @@ fn render_jpeg_bytes(
     _quality: u8,
 ) -> PyResult<Vec<u8>> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
-        "PNG/JPEG output requires the `skia-image` feature; install `pjsekai-scores-rs-skia-image` or build with `--features python,skia-image`",
+        "PNG/JPEG output requires the `skia-image` feature; install `pjsekai-scores-rs-skia-image` or build with `--features python,skia-image` (or `python,tiny-skia-image`)",
     ))
 }
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 fn checked_jpeg_quality(quality: u8) -> PyResult<u8> {
     if quality <= 100 {
         Ok(quality)
@@ -668,13 +668,13 @@ impl PyRebase {
     }
 }
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 #[pyclass(name = "RasterImage", frozen)]
 struct PyRasterImage {
     inner: crate::SkiaRasterOutput,
 }
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 #[pymethods]
 impl PyRasterImage {
     #[getter]
@@ -724,7 +724,7 @@ impl PyRasterImage {
     }
 }
 
-#[cfg(feature = "skia-image")]
+#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
 unsafe fn fill_readonly_buffer(
     view: *mut ffi::Py_buffer,
     flags: c_int,
@@ -862,7 +862,7 @@ impl PyDrawing {
     }
 
     /// Render into a read-only native N32 premultiplied pixel buffer without encoding.
-    #[cfg(feature = "skia-image")]
+    #[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
     #[pyo3(signature = (score=None, lyric=None))]
     fn raster(
         &mut self,
@@ -1268,8 +1268,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLyric>()?;
     m.add_class::<PyRebase>()?;
     m.add_class::<PyDrawing>()?;
-    #[cfg(feature = "skia-image")]
+    #[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
     m.add_class::<PyRasterImage>()?;
+    #[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
+    m.add("RASTER_BACKEND", crate::RASTER_BACKEND)?;
     m.add_function(wrap_pyfunction!(sus_to_svg, m)?)?;
     m.add_function(wrap_pyfunction!(sus_to_png, m)?)?;
     m.add_function(wrap_pyfunction!(sus_to_jpg, m)?)?;

@@ -190,6 +190,10 @@ class Rebase:
     def __call__(self, score: Score) -> Score: ...
 
 
+# Raster backend of an image-enabled build: "skia" or "tiny-skia". Absent in SVG-only builds.
+RASTER_BACKEND: str
+
+
 class RasterImage:
     def __new__(cls) -> NoReturn: ...
 

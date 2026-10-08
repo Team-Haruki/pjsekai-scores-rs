@@ -28,6 +28,11 @@ jobs:
       feature-sets: |
         default
         --features python,skia-image
+        --features python,tiny-skia-image
+      # Both raster backends together run the tiny-skia vs Skia similarity tests.
+      test-feature-sets: |
+        default
+        --features skia-image,tiny-skia-image
       targets: wasm32-unknown-unknown
       extra-lint-command: cargo check --locked --target wasm32-unknown-unknown --no-default-features --features wasm
 
@@ -36,10 +41,12 @@ jobs:
     uses: seiunx-dev/ci-templates/.github/workflows/maturin-wheels.yml@v1
     with:
       targets: '[{"label":"linux-x64","os":"ubuntu-latest","target":"x86_64"}]'
-      variants: '["default", "skia-image"]'
+      # tiny-skia-image is smoke-built only (experimental; not published by release.yml).
+      variants: '["default", "skia-image", "tiny-skia-image"]'
       configure-command: |
         case "$WHEEL_VARIANT" in
           skia-image) export PYTHON_PACKAGE_NAME=pjsekai-scores-rs-skia-image MATURIN_FEATURES_TOML='["python", "skia-image"]' ;;
+          tiny-skia-image) export PYTHON_PACKAGE_NAME=pjsekai-scores-rs-tiny-skia-image MATURIN_FEATURES_TOML='["python", "tiny-skia-image"]' ;;
           *)          export PYTHON_PACKAGE_NAME=pjsekai-scores-rs MATURIN_FEATURES_TOML='["python"]' ;;
         esac
         bash .github/scripts/configure-python-package.sh
