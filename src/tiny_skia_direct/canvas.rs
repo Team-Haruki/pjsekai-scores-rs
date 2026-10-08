@@ -1105,41 +1105,89 @@ impl TranslatedBlit<'_> {
             return;
         }
         let sy = y + self.oy;
-        let (r0, r1) = (self.src_row(sy), self.src_row(sy + 1));
-        let wy = self.wy;
-        let lerp = |a: u32, b: u32, w: u32| -> u32 { (a * (256 - w) + b * w + 128) >> 8 };
-
-        // Fast path: integer x offset, so each output pixel is a vertical lerp of
-        // one source column, computed for the whole in-bounds span at once.
-        if self.wx == 0 && row_cov == 255 {
-            let lo = self.x0.max(-self.ox);
-            let hi = self.x1.min(self.sw - self.ox);
+        if row_cov == 255 {
+            // The interior: both horizontal taps inside the source and full column
+            // coverage (partial columns only occur at the two ends).
+            let mut lo = self.x0.max(-self.ox);
+            let mut hi = self.x1.min(self.sw - self.ox - i64::from(self.wx != 0));
+            while lo < hi && self.col_cov[(lo - self.x0) as usize] != 255 {
+                lo += 1;
+            }
+            while lo < hi && self.col_cov[(hi - 1 - self.x0) as usize] != 255 {
+                hi -= 1;
+            }
             if lo < hi {
-                let (d0, d1) = (lo as usize * 4, hi as usize * 4);
-                let (s0, s1) = (((lo + self.ox) * 4) as usize, ((hi + self.ox) * 4) as usize);
-                let (a, b) = (&r0[s0..s1], &r1[s0..s1]);
-                let out = &mut dst[d0..d1];
-                let first = (lo - self.x0) as usize;
-                let opaque_full = self.col_cov[first..first + (hi - lo) as usize]
-                    .iter()
-                    .all(|&c| c == 255)
-                    && a.as_chunks::<4>().0.iter().all(|p| p[3] == 255)
-                    && (wy == 0 || b.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
-                if opaque_full {
-                    if wy == 0 {
-                        out.copy_from_slice(a);
-                    } else {
-                        for ((o, &p), &q) in out.iter_mut().zip(a).zip(b) {
-                            *o = lerp(u32::from(p), u32::from(q), wy) as u8;
-                        }
-                    }
-                    self.span(dst, self.x0, lo, row_cov, sy);
-                    self.span(dst, hi, self.x1, row_cov, sy);
-                    return;
-                }
+                self.interior(dst, lo, hi, sy);
+                self.span(dst, self.x0, lo, row_cov, sy);
+                self.span(dst, hi, self.x1, row_cov, sy);
+                return;
             }
         }
         self.span(dst, self.x0, self.x1, row_cov, sy);
+    }
+
+    /// Fully covered pixels `[lo, hi)` whose taps are all in bounds. Every
+    /// channel uses the same weights, so the bilinear filter runs bytewise (and
+    /// vectorizes) into a scratch row, which is then composited.
+    fn interior(&self, dst: &mut [u8], lo: i64, hi: i64, sy: i64) {
+        thread_local! {
+            static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let (r0, r1) = (self.src_row(sy), self.src_row(sy + 1));
+        let n = ((hi - lo) * 4) as usize;
+        let s0 = ((lo + self.ox) * 4) as usize;
+        let (wx, wy) = (self.wx as u16, self.wy as u16);
+        let out = &mut dst[lo as usize * 4..hi as usize * 4];
+        SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch.clear();
+            scratch.resize(n, 0);
+            let filtered = &mut scratch[..];
+            let lerp = |a: u8, b: u8, w: u16| -> u16 {
+                (u16::from(a) * (256 - w) + u16::from(b) * w + 128) >> 8
+            };
+            match (wx, wy) {
+                (0, 0) => filtered.copy_from_slice(&r0[s0..s0 + n]),
+                (0, _) => {
+                    for ((f, &a), &b) in filtered.iter_mut().zip(&r0[s0..]).zip(&r1[s0..]) {
+                        *f = lerp(a, b, wy) as u8;
+                    }
+                }
+                (_, 0) => {
+                    for ((f, &a), &b) in filtered.iter_mut().zip(&r0[s0..]).zip(&r0[s0 + 4..]) {
+                        *f = lerp(a, b, wx) as u8;
+                    }
+                }
+                _ => {
+                    let rows = r0[s0..]
+                        .iter()
+                        .zip(&r0[s0 + 4..])
+                        .zip(r1[s0..].iter().zip(&r1[s0 + 4..]));
+                    for (f, ((&a, &b), (&c, &d))) in filtered.iter_mut().zip(rows) {
+                        let top = lerp(a, b, wx);
+                        let bottom = lerp(c, d, wx);
+                        *f = ((top * (256 - wy) + bottom * wy + 128) >> 8) as u8;
+                    }
+                }
+            }
+            for (o, p) in out
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(filtered.as_chunks::<4>().0)
+            {
+                match p[3] {
+                    255 => *o = *p,
+                    0 => {}
+                    alpha => {
+                        let inv = 255 - u32::from(alpha);
+                        for c in 0..4 {
+                            o[c] = (u32::from(p[c]) + div255(u32::from(o[c]) * inv)).min(255) as u8;
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// General per-pixel path for `[from, to)`.
