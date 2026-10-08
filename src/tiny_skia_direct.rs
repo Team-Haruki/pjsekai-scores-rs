@@ -42,6 +42,11 @@ const CUSTOM_FONT_CACHE_MAX_ENTRIES: usize = 8;
 static CUSTOM_FONT_CACHE: LazyLock<Mutex<HashMap<Vec<FontFileKey>, SharedCustomTypefaces>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
+/// Decoded note sprites per sprite set; at most this many sets are kept.
+const NOTE_ASSET_CACHE_MAX_ENTRIES: usize = 4;
+static NOTE_ASSET_CACHE: LazyLock<Mutex<HashMap<NoteAssetsKey, Arc<NoteAssets>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static WORKER_THREADS: OnceLock<usize> = OnceLock::new();
 
 const FALLBACK_FONT_FAMILIES: &[&str] = &[
     "Hiragino Sans",
@@ -503,7 +508,7 @@ struct DirectRenderer<'a> {
     drawing: &'a Drawing,
     styles: CssStyles,
     custom_typefaces: SharedCustomTypefaces,
-    note_assets: NoteAssets,
+    note_assets: Arc<NoteAssets>,
     font_cache: Mutex<HashMap<FontKey, Font>>,
 }
 
@@ -684,10 +689,7 @@ impl<'a> DirectRenderer<'a> {
 
         std::thread::scope(|scope| {
             let drawing = self.drawing;
-            let worker_count = std::thread::available_parallelism()
-                .map(|threads| threads.get())
-                .unwrap_or(1)
-                .min(layout.segments.len());
+            let worker_count = worker_threads().min(layout.segments.len());
             let chunk_size = layout.segments.len().div_ceil(worker_count);
             let handles: Vec<_> = layout
                 .segments
@@ -696,7 +698,7 @@ impl<'a> DirectRenderer<'a> {
                 .map(|(chunk_idx, segments)| {
                     let start_idx = chunk_idx * chunk_size;
                     let styles = self.styles.clone();
-                    let note_assets = self.note_assets.clone();
+                    let note_assets = Arc::clone(&self.note_assets);
                     let custom_typefaces = self.custom_typefaces.clone();
                     scope.spawn(move || {
                         let renderer = DirectRenderer {
@@ -2089,18 +2091,50 @@ struct NoteAssets {
     sliced_notes: HashMap<NoteBodyKey, Image>,
 }
 
+/// Identifies a decoded sprite set: every sprite file (path, modified time,
+/// size) and the lane width the note bodies are pre-sliced for.
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct NoteAssetsKey {
+    lane_width: i32,
+    files: Vec<(String, FontFileKey)>,
+}
+
 impl NoteAssets {
-    fn load(cfg: &DrawingConfig) -> Self {
-        // Skia decodes lazily on first draw; decoding the ~40 sprites eagerly with the
-        // pure-Rust `png` crate is done in parallel instead to keep setup comparable.
+    /// The decoded sprites for `cfg`, shared between renders (and threads) while
+    /// the files are unchanged, like the custom font cache.
+    fn load(cfg: &DrawingConfig) -> Arc<Self> {
         let paths = note_asset_names()
             .into_iter()
             .filter_map(|name| note_asset_path(cfg, &name).map(|path| (name, path)))
             .collect::<Vec<_>>();
-        let workers = std::thread::available_parallelism()
-            .map(|threads| threads.get())
-            .unwrap_or(1)
-            .clamp(1, 8);
+        let key = NoteAssetsKey {
+            lane_width: cfg.lane_width,
+            files: paths
+                .iter()
+                .filter_map(|(name, path)| Some((name.clone(), file_key(path)?)))
+                .collect(),
+        };
+        if let Some(assets) = NOTE_ASSET_CACHE
+            .lock()
+            .expect("note asset cache lock poisoned")
+            .get(&key)
+        {
+            return Arc::clone(assets);
+        }
+        let assets = Arc::new(Self::decode(cfg, &paths));
+        let mut cache = NOTE_ASSET_CACHE
+            .lock()
+            .expect("note asset cache lock poisoned");
+        if cache.len() >= NOTE_ASSET_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&assets));
+        assets
+    }
+
+    fn decode(cfg: &DrawingConfig, paths: &[(String, PathBuf)]) -> Self {
+        // Decoding the ~40 sprites with the pure-Rust `png` crate runs in parallel.
+        let workers = worker_threads().clamp(1, 8);
         let chunk_size = paths.len().div_ceil(workers).max(1);
         let images: HashMap<String, Image> = std::thread::scope(|scope| {
             let handles: Vec<_> = paths
@@ -2256,6 +2290,15 @@ fn font_cache_key(font_paths: &[PathBuf]) -> Result<Vec<FontFileKey>, SkiaDirect
         .collect()
 }
 
+fn file_key(path: &Path) -> Option<FontFileKey> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(FontFileKey {
+        path: path.to_path_buf(),
+        modified_nanos: metadata.modified().ok().and_then(system_time_nanos),
+        len: metadata.len(),
+    })
+}
+
 fn system_time_nanos(time: SystemTime) -> Option<u128> {
     time.duration_since(UNIX_EPOCH)
         .ok()
@@ -2343,10 +2386,17 @@ fn note_asset_path(cfg: &DrawingConfig, name: &str) -> Option<PathBuf> {
 }
 
 fn should_render_segments_parallel(layout: &Layout) -> bool {
-    layout.segments.len() > 1
-        && std::thread::available_parallelism()
-            .map(|threads| threads.get() > 1)
-            .unwrap_or(false)
+    layout.segments.len() > 1 && worker_threads() > 1
+}
+
+/// `available_parallelism`, read once: on Linux it parses cgroup files, which is
+/// not free on a per-draw path.
+fn worker_threads() -> usize {
+    *WORKER_THREADS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|threads| threads.get())
+            .unwrap_or(1)
+    })
 }
 
 fn segment_score(source: &Score) -> Score {
