@@ -47,6 +47,10 @@ const NOTE_ASSET_CACHE_MAX_ENTRIES: usize = 4;
 static NOTE_ASSET_CACHE: LazyLock<Mutex<HashMap<NoteAssetsKey, Arc<NoteAssets>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static WORKER_THREADS: OnceLock<usize> = OnceLock::new();
+/// Recently drawn jackets, decoded (most recent last); at most this many.
+const JACKET_CACHE_MAX_ENTRIES: usize = 8;
+static JACKET_CACHE: LazyLock<Mutex<Vec<(FontFileKey, Image)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 const FALLBACK_FONT_FAMILIES: &[&str] = &[
     "Hiragino Sans",
@@ -1810,12 +1814,7 @@ impl<'a> DirectRenderer<'a> {
             return Ok(());
         };
 
-        let bytes = fs::read(path.as_path()).map_err(|source| SkiaDirectError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let image =
-            codec::decode_image(&bytes).ok_or_else(|| SkiaDirectError::Decode(path.clone()))?;
+        let image = load_jacket(&path)?;
         canvas.draw_image_rect(&image, None, rect);
         Ok(())
     }
@@ -2345,6 +2344,37 @@ fn font_cache_key(font_paths: &[PathBuf]) -> Result<Vec<FontFileKey>, SkiaDirect
             })
         })
         .collect()
+}
+
+/// The decoded jacket at `path`, from a small per-process cache keyed like the
+/// font cache (path, modified time, size): charts of the same song are
+/// usually rendered more than once (difficulties, re-requests).
+fn load_jacket(path: &Path) -> Result<Image, SkiaDirectError> {
+    let key = file_key(path);
+    if let Some(key) = &key {
+        let mut cache = JACKET_CACHE.lock().expect("jacket cache lock poisoned");
+        if let Some(index) = cache.iter().position(|(cached, _)| cached == key) {
+            let entry = cache.remove(index);
+            let image = entry.1.clone();
+            cache.push(entry);
+            return Ok(image);
+        }
+    }
+    let bytes = fs::read(path).map_err(|source| SkiaDirectError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let image = Arc::new(
+        codec::decode_image(&bytes).ok_or_else(|| SkiaDirectError::Decode(path.to_path_buf()))?,
+    );
+    if let Some(key) = key {
+        let mut cache = JACKET_CACHE.lock().expect("jacket cache lock poisoned");
+        if cache.len() >= JACKET_CACHE_MAX_ENTRIES {
+            cache.remove(0);
+        }
+        cache.push((key, image.clone()));
+    }
+    Ok(image)
 }
 
 fn file_key(path: &Path) -> Option<FontFileKey> {
