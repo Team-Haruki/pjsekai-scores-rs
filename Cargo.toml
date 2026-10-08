@@ -19,6 +19,9 @@ tiny-skia-image = [
     "dep:mozjpeg-rs",
     "dep:libz-sys",
 ]
+# With `tiny-skia-image`: resolve font families that are not in font_paths/font_dirs
+# (and generic ones such as sans-serif) from the system fonts via fontdb.
+system-fonts = ["dep:fontdb"]
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
@@ -37,6 +40,7 @@ zune-jpeg = { version = "0.5", optional = true }
 mozjpeg-rs = { version = "0.9", optional = true, default-features = false, features = ["fast-yuv"] }
 # mtpng's zlib, built in statically so tiny-skia builds need no shared libraries.
 libz-sys = { version = "1.1", optional = true, features = ["static"] }
+fontdb = { version = "0.24", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 
 [profile.release]

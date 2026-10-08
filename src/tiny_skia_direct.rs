@@ -4,12 +4,15 @@
 //! The layout and drawing code follows `skia_direct.rs` function by function so the
 //! two can be diffed; only the canvas, font and codec layers differ (see the
 //! `canvas`, `text` and `codec` submodules). Pixels are premultiplied RGBA8888.
-//! Fonts come only from `font_paths` / `font_dirs`; there is no system font lookup.
+//! Fonts come from `font_paths` / `font_dirs`; with the `system-fonts` feature,
+//! families that are not registered there resolve from the system fonts.
 
 mod aaa;
 mod canvas;
 mod codec;
 mod raster;
+#[cfg(feature = "system-fonts")]
+mod system_fonts;
 mod text;
 
 use std::collections::HashMap;
@@ -86,6 +89,9 @@ pub enum SkiaDirectError {
     },
     Decode(PathBuf),
     Encode,
+    /// No font to draw text with: nothing in `font_paths` / `font_dirs` and no
+    /// system font fallback.
+    NoFonts,
 }
 
 /// Name of this raster backend.
@@ -210,6 +216,10 @@ impl fmt::Display for SkiaDirectError {
                 write!(f, "failed to decode image asset {}", path.display())
             }
             SkiaDirectError::Encode => f.write_str("failed to encode raster output"),
+            SkiaDirectError::NoFonts => f.write_str(
+                "no fonts to draw text with: the tiny-skia backend only uses fonts passed in \
+                 font_paths / font_dirs unless it is built with the `system-fonts` feature",
+            ),
         }
     }
 }
@@ -577,6 +587,9 @@ impl<'a> DirectRenderer<'a> {
     fn new(drawing: &'a Drawing, styles: CssStyles) -> Result<Self, SkiaDirectError> {
         let note_assets = NoteAssets::load(&drawing.config);
         let custom_typefaces = build_font_manager(&drawing.config)?;
+        if custom_typefaces.is_empty() && !system_fonts_available() {
+            return Err(SkiaDirectError::NoFonts);
+        }
         Ok(Self {
             drawing,
             styles,
@@ -1970,8 +1983,9 @@ impl<'a> DirectRenderer<'a> {
             .chain(FALLBACK_FONT_FAMILIES.iter().copied())
             .filter_map(|family| self.match_font_family(family, style, &required_cjk_glyphs))
             .next()
-            // No system font manager: the default typeface is the closest custom font.
-            .or_else(|| self.match_any_custom_font(style, &required_cjk_glyphs));
+            // The default typeface: the closest custom font, else a system one.
+            .or_else(|| self.match_any_custom_font(style, &required_cjk_glyphs))
+            .or_else(|| system_default_typeface(style, &required_cjk_glyphs));
         let mut font = if let Some(typeface) = typeface {
             Font::new(typeface, Some(size))
         } else {
@@ -1998,9 +2012,10 @@ impl<'a> DirectRenderer<'a> {
             return None;
         }
 
-        // Only registered font files are searched; generic and system families
-        // (`sans-serif`, `Hiragino Sans`, ...) do not resolve without a font manager.
+        // Registered font files first, then (feature `system-fonts`) the system
+        // fonts, which also resolve generic families such as `sans-serif`.
         self.match_custom_font_family(family, style, required_cjk_glyphs)
+            .or_else(|| system_match_family(family, style, required_cjk_glyphs))
     }
 
     fn match_custom_font_family(
@@ -2474,6 +2489,40 @@ fn note_asset_path(cfg: &DrawingConfig, name: &str) -> Option<PathBuf> {
 
 fn should_render_segments_parallel(layout: &Layout) -> bool {
     layout.segments.len() > 1 && worker_threads() > 1
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_fonts_available() -> bool {
+    system_fonts::available()
+}
+
+#[cfg(not(feature = "system-fonts"))]
+fn system_fonts_available() -> bool {
+    false
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_match_family(
+    family: &str,
+    style: FontStyle,
+    required_glyphs: &[Unichar],
+) -> Option<Typeface> {
+    system_fonts::match_family(family, style, required_glyphs)
+}
+
+#[cfg(not(feature = "system-fonts"))]
+fn system_match_family(_: &str, _: FontStyle, _: &[Unichar]) -> Option<Typeface> {
+    None
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_default_typeface(style: FontStyle, required_glyphs: &[Unichar]) -> Option<Typeface> {
+    system_fonts::default_typeface(style, required_glyphs)
+}
+
+#[cfg(not(feature = "system-fonts"))]
+fn system_default_typeface(_: FontStyle, _: &[Unichar]) -> Option<Typeface> {
+    None
 }
 
 /// `available_parallelism`, read once: on Linux it parses cgroup files, which is
@@ -3827,6 +3876,7 @@ fn format_g(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::JpegSubsampling;
+    use super::SkiaDirectError;
     use super::{
         SkiaRasterColorType, canvas::Canvas, canvas::Paint, canvas::Rect, codec, parse_css_body,
         parse_font_families, score_to_skia_raster,
@@ -3932,7 +3982,15 @@ mod tests {
         .expect("score");
         let mut drawing = Drawing::new(None, None, false, None, None, None);
 
-        let raster = score_to_skia_raster(&mut drawing, &mut score, None).expect("raster");
+        // Without registered fonts, text needs the system font fallback.
+        let raster = match score_to_skia_raster(&mut drawing, &mut score, None) {
+            Ok(raster) => raster,
+            Err(SkiaDirectError::NoFonts) => {
+                assert!(!super::system_fonts_available());
+                return;
+            }
+            Err(error) => panic!("raster: {error}"),
+        };
 
         assert!(raster.width > 0);
         assert!(raster.height > 0);
