@@ -508,7 +508,7 @@ impl Font {
                 right: right - left,
                 bottom: bottom - top,
             };
-            aaa::add_path(&mut raster, &device, clip, (0, 0));
+            aaa::add_path(&mut raster, &device, clip, (0, 0), true);
             Quantize::Round255
         };
         let mut coverage = vec![0_u8; width * height];

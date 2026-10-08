@@ -341,12 +341,7 @@ impl<'a> Canvas<'a> {
         if self.clip_is_empty() {
             return;
         }
-        // Thin rects (grid lines) are cheaper in a direct loop; wide ones go through
-        // tiny-skia's SIMD pipeline. Both produce identical pixels.
-        if paint.shader.is_none()
-            && self.state.clip.path_mask.is_none()
-            && rect.width().min(rect.height()) <= THIN_RECT
-        {
+        if paint.shader.is_none() && self.state.clip.path_mask.is_none() {
             self.blend_rect_solid(rect, premultiplied(paint.color));
             return;
         }
@@ -368,73 +363,116 @@ impl<'a> Canvas<'a> {
         );
     }
 
-    /// Source-over fill of a device rect with exact area coverage at its edges (what
-    /// tiny-skia's `fill_rect_aa` and Skia's analytic AA compute), multiplied by the
-    /// clip rect's coverage. A direct loop: grid lines and lane backgrounds are the
-    /// most common draws, and tiny-skia's pipeline is slow on 1-2 px wide spans.
+    /// Source-over fill of a device rect the way Skia's `SkScan::AntiFillRect`
+    /// does it: edges at 1/256 px, partial rows and columns with `SkAlphaMul`
+    /// coverage, the interior as a plain fill, all through the legacy N32
+    /// blitter's blend (`blend_legacy`). Integral clip rects intersect the rect
+    /// first, as a rect clip region does; fractional ones scale the coverage.
     fn blend_rect_solid(&mut self, rect: Rect, src: [u32; 4]) {
         let (width, height) = (self.pixmap.width() as i64, self.pixmap.height() as i64);
-        let clip = self.state.clip.rect;
-        let area = clip.map_or(rect, |clip| rect.intersect(&clip));
-        let x0 = (area.left.floor() as i64).max(0);
-        let x1 = (area.right.ceil() as i64).min(width);
-        let y0 = (area.top.floor() as i64).max(0);
-        let y1 = (area.bottom.ceil() as i64).min(height);
-        if x0 >= x1 || y0 >= y1 || src[3] == 0 {
+        let (rect, aa_clip) = match self.state.clip.rect {
+            Some(clip) if is_integral(&clip) => (rect.intersect(&clip), None),
+            other => (rect, other),
+        };
+        let rect = rect.intersect(&Rect::from_ltrb(0.0, 0.0, width as f32, height as f32));
+        if rect.is_empty() || src[3] == 0 {
             return;
         }
-        let axis = |p: i64, lo: f32, hi: f32, clip_lo: Option<f32>, clip_hi: Option<f32>| {
-            let cov = span_coverage(p, lo, hi);
-            match (clip_lo, clip_hi) {
-                (Some(a), Some(b)) => div255(cov * span_coverage(p, a, b)),
-                _ => cov,
+        // `SkScalarToFixed` then `SkFixedToFDot8` (rounded).
+        let fdot8 = |v: f32| (i64::from((v * 65536.0) as i32) + 128) >> 8;
+        let (l, t, r, b) = (
+            fdot8(rect.left),
+            fdot8(rect.top),
+            fdot8(rect.right),
+            fdot8(rect.bottom),
+        );
+        if l >= r || t >= b {
+            return;
+        }
+        const FULL: i64 = 256;
+        // Row coverage: partial top/bottom rows, FULL in between.
+        let mut rows: Vec<(i64, i64)> = Vec::with_capacity(3);
+        let mut top = t >> 8;
+        if top == (b - 1) >> 8 {
+            rows.push((top, b - t - 1));
+        } else {
+            if t & 0xFF != 0 {
+                rows.push((top, 256 - (t & 0xFF)));
+                top += 1;
+            }
+            let bottom = b >> 8;
+            for y in top..bottom {
+                rows.push((y, FULL));
+            }
+            if b & 0xFF != 0 {
+                rows.push((bottom, b & 0xFF));
+            }
+        }
+        // Column coverage: one partial column on each side around a FULL run,
+        // or a single column.
+        let mut left = l >> 8;
+        let single_column = left == (r - 1) >> 8;
+        let left_alpha = (!single_column && l & 0xFF != 0).then(|| 256 - (l & 0xFF));
+        if left_alpha.is_some() {
+            left += 1;
+        }
+        let right = r >> 8;
+        let right_alpha = (!single_column && r & 0xFF != 0).then_some(r & 0xFF);
+        let combine = |row: i64, col: i64| -> u32 {
+            match (row == FULL, col == FULL) {
+                (true, true) => 255,
+                (true, false) => col as u32,
+                (false, true) => row as u32,
+                (false, false) => ((row * col) >> 8) as u32,
             }
         };
-        let col_cov: Vec<u32> = (x0..x1)
-            .map(|x| {
-                axis(
-                    x,
-                    rect.left,
-                    rect.right,
-                    clip.map(|c| c.left),
-                    clip.map(|c| c.right),
-                )
+        let clip_cov = |x: i64, y: i64| -> u32 {
+            aa_clip.map_or(255, |c| {
+                div255(span_coverage(x, c.left, c.right) * span_coverage(y, c.top, c.bottom))
             })
-            .collect();
+        };
+        let row_bytes = width as usize * 4;
         let data = self.pixmap.data_mut();
-        let opaque = src[3] == 255;
-        let solid = src.map(|v| v as u8);
-        for y in y0..y1 {
-            let row_cov = axis(
-                y,
-                rect.top,
-                rect.bottom,
-                clip.map(|c| c.top),
-                clip.map(|c| c.bottom),
-            );
-            if row_cov == 0 {
+        for (y, row) in rows {
+            let line = &mut data[y as usize * row_bytes..][..row_bytes];
+            let blend_at = |line: &mut [u8], x: i64, alpha: u32| {
+                let alpha = if aa_clip.is_some() {
+                    div255(alpha * clip_cov(x, y))
+                } else {
+                    alpha
+                };
+                let px = (&mut line[x as usize * 4..][..4])
+                    .try_into()
+                    .expect("pixel");
+                blend_legacy(px, src, alpha);
+            };
+            if single_column {
+                // `blitV(.., R - L - 1)` in full rows, `SkAlphaMul(alpha, R - L)` in
+                // partial ones.
+                let alpha = if row == FULL {
+                    (r - l - 1) as u32
+                } else {
+                    ((row * (r - l)) >> 8) as u32
+                };
+                blend_at(line, l >> 8, alpha);
                 continue;
             }
-            let row = &mut data[(y * width) as usize * 4..][..width as usize * 4];
-            for (i, x) in (x0..x1).enumerate() {
-                let cov = if row_cov == 255 {
-                    col_cov[i]
+            if let Some(col) = left_alpha {
+                blend_at(line, left - 1, combine(row, col));
+            }
+            if right > left {
+                let alpha = combine(row, FULL);
+                if aa_clip.is_some() {
+                    for x in left..right {
+                        blend_at(line, x, alpha);
+                    }
                 } else {
-                    div255(row_cov * col_cov[i])
-                };
-                if cov == 0 {
-                    continue;
+                    let span = &mut line[left as usize * 4..right as usize * 4];
+                    blend_legacy_run(span, src, alpha);
                 }
-                let px = &mut row[x as usize * 4..][..4];
-                if cov == 255 && opaque {
-                    px.copy_from_slice(&solid);
-                    continue;
-                }
-                let s = src.map(|v| div255(v * cov));
-                let inv = 255 - s[3];
-                for c in 0..4 {
-                    px[c] = (s[c] + div255(u32::from(px[c]) * inv)).min(255) as u8;
-                }
+            }
+            if let Some(col) = right_alpha {
+                blend_at(line, right, combine(row, col));
             }
         }
     }
@@ -555,7 +593,8 @@ impl<'a> Canvas<'a> {
             }
             None => Source::Solid(premultiplied(paint.color)),
         };
-        self.fill_device_coverage(&device, &source);
+        // Stroke outlines overlap themselves at joins.
+        self.fill_device_coverage(&device, &source, outline.is_some());
     }
 
     /// Blits glyph masks the way Skia blits A8 glyph masks: coverage is
@@ -631,7 +670,7 @@ impl<'a> Canvas<'a> {
     /// Skia's analytic AA, instead of tiny-skia's 4x4 supersampling, which only
     /// has a few coverage levels on near-vertical edges. The outline is the one
     /// Skia's scan converter builds (see `aaa`), not the ideal one.
-    fn fill_device_coverage(&mut self, path: &Path, source: &Source) {
+    fn fill_device_coverage(&mut self, path: &Path, source: &Source, may_overlap: bool) {
         let (width, height) = (self.pixmap.width() as i64, self.pixmap.height() as i64);
         let bounds = path.bounds();
         let mut x0 = (bounds.left().floor() as i64).max(0);
@@ -664,7 +703,7 @@ impl<'a> Canvas<'a> {
             device_clip.right = device_clip.right.min(clip.right.ceil());
             device_clip.bottom = device_clip.bottom.min(clip.bottom.ceil());
         }
-        aaa::add_path(&mut raster, path, device_clip, (x0, y0));
+        aaa::add_path(&mut raster, path, device_clip, (x0, y0), may_overlap);
         // Clip-rect coverage of each column; `None` when every column is inside.
         let clip_cols: Option<Vec<u32>> = clip_rect
             .filter(|clip| clip.left > x0 as f32 || clip.right < x1 as f32)
@@ -801,20 +840,78 @@ impl<'a> Canvas<'a> {
     }
 }
 
-/// Rects at most this thick (device px) are blended by `Canvas::blend_rect_solid`.
-const THIN_RECT: f32 = 4.0;
-
-/// Source-over blend of a solid premultiplied colour through a coverage span.
+/// Source-over blend of a solid premultiplied colour through a coverage span,
+/// with Skia's legacy N32 blitter arithmetic (see `blend_legacy`). Runs of
+/// empty and full coverage (most of a fill) are skipped or blended in bulk.
 fn blend_solid_span(dst: &mut [u8], coverage: &[u8], src: [u32; 4]) {
-    let solid = src.map(|v| v as u8);
-    let opaque = src[3] == 255;
-    for (px, &cov) in dst.as_chunks_mut::<4>().0.iter_mut().zip(coverage) {
-        match cov {
-            0 => {}
-            255 if opaque => *px = solid,
-            cov => blend_pixel(px, src, u32::from(cov)),
+    let mut i = 0;
+    while i < coverage.len() {
+        match coverage[i] {
+            0 => {
+                i += coverage[i..]
+                    .iter()
+                    .position(|&c| c != 0)
+                    .unwrap_or(coverage.len() - i);
+            }
+            255 => {
+                let run = coverage[i..]
+                    .iter()
+                    .position(|&c| c != 255)
+                    .unwrap_or(coverage.len() - i);
+                blend_legacy_run(&mut dst[i * 4..(i + run) * 4], src, 255);
+                i += run;
+            }
+            cov => {
+                let px = (&mut dst[i * 4..i * 4 + 4]).try_into().expect("pixel");
+                blend_legacy(px, src, u32::from(cov));
+                i += 1;
+            }
         }
     }
+}
+
+/// `blend_legacy` with one coverage value for a whole run of pixels, written
+/// over 16-byte blocks so it vectorizes.
+fn blend_legacy_run(dst: &mut [u8], src: [u32; 4], alpha: u32) {
+    let scale = alpha + 1;
+    let s = src.map(|v| ((v * scale) >> 8) as u16);
+    let pattern: [u16; 16] = std::array::from_fn(|k| s[k % 4]);
+    let (blocks, tail) = dst.as_chunks_mut::<16>();
+    if s[3] == 255 {
+        let solid: [u8; 16] = pattern.map(|v| v as u8);
+        blocks.fill(solid);
+        tail.copy_from_slice(&solid[..tail.len()]);
+        return;
+    }
+    let inv = 256 - s[3];
+    for block in blocks {
+        for k in 0..16 {
+            block[k] = (pattern[k] + ((u16::from(block[k]) * inv) >> 8)) as u8;
+        }
+    }
+    for (k, v) in tail.iter_mut().enumerate() {
+        *v = (pattern[k] + ((u16::from(*v) * inv) >> 8)) as u8;
+    }
+}
+
+/// Skia's legacy N32 blitter for a solid colour at coverage `alpha`
+/// (`SkARGB32_Blitter::blitAntiH`/`blitV`, `blit_mask_d32_a8`): the colour is
+/// scaled by `(alpha + 1) >> 8` (`SkAlphaMulQ`) and blended as
+/// `s + (d * (256 - sa)) >> 8` (`SkBlitRow::Color32`).
+#[inline]
+fn blend_legacy(px: &mut [u8; 4], src: [u32; 4], alpha: u32) {
+    let scale = alpha + 1;
+    let s = src.map(|v| (v * scale) >> 8);
+    let inv = 256 - s[3];
+    for i in 0..4 {
+        px[i] = (s[i] + ((u32::from(px[i]) * inv) >> 8)) as u8;
+    }
+}
+
+fn is_integral(rect: &Rect) -> bool {
+    [rect.left, rect.top, rect.right, rect.bottom]
+        .iter()
+        .all(|v| v.fract() == 0.0)
 }
 
 /// Source-over of `src` (premultiplied) scaled by `cov` onto `px`.
@@ -961,10 +1058,7 @@ fn blit_translated(dst: &mut PixmapMut<'_>, image: &Pixmap, tx: f32, ty: f32, de
     let row_bytes = dw as usize * 4;
     let rows = &mut dst.data_mut()[y0 as usize * row_bytes..y1 as usize * row_bytes];
     let pixels = ((x1 - x0) * (y1 - y0)) as usize;
-    let threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min((pixels / (128 * 1024)).max(1));
+    let threads = super::worker_threads().min((pixels / (128 * 1024)).max(1));
     if threads <= 1 {
         for (i, row) in rows.chunks_exact_mut(row_bytes).enumerate() {
             blit.row(row, y0 + i as i64);

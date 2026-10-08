@@ -37,7 +37,17 @@ pub(super) struct ClipRect {
 /// Adds the edges Skia's analytic AA would build for `path` (device space) to
 /// `raster`, whose box starts at the integral device position `origin`.
 /// `clip` is the device clip; it only matters when the path is not inside it.
-pub(super) fn add_path(raster: &mut Rasterizer, path: &Path, clip: ClipRect, origin: (i64, i64)) {
+/// `may_overlap` marks paths whose contours can overlap themselves with the
+/// same winding (stroke outlines, fake-bold glyphs): those need the walker's
+/// non-zero interval logic. Other single-contour paths are accumulated
+/// directly, which gives the same coverage.
+pub(super) fn add_path(
+    raster: &mut Rasterizer,
+    path: &Path,
+    clip: ClipRect,
+    origin: (i64, i64),
+    may_overlap: bool,
+) {
     let bounds = path.bounds();
     let contained = bounds.left().floor() >= clip.left
         && bounds.top().floor() >= clip.top
@@ -88,7 +98,17 @@ pub(super) fn add_path(raster: &mut Rasterizer, path: &Path, clip: ClipRect, ori
     if open {
         edge_line(&mut sink, last, start, clip);
     }
-    resolve_non_zero(raster, &mut sink.lines);
+    let contours = path
+        .segments()
+        .filter(|segment| matches!(segment, PathSegment::MoveTo(_)))
+        .count();
+    if may_overlap || contours > 1 {
+        resolve_non_zero(raster, &mut sink.lines);
+    } else {
+        for line in &sink.lines {
+            emit(raster, line, line.y0, line.y1, line.winding);
+        }
+    }
 }
 
 /// An edge in box coordinates, top to bottom, with its winding direction.
@@ -98,12 +118,29 @@ struct Line {
     y0: f32,
     x1: f32,
     y1: f32,
+    dxdy: f32,
     winding: i32,
 }
 
 impl Line {
+    fn new(x0: f32, y0: f32, x1: f32, y1: f32, winding: i32) -> Self {
+        let dxdy = if y1 > y0 { (x1 - x0) / (y1 - y0) } else { 0.0 };
+        Self {
+            x0,
+            y0,
+            x1,
+            y1,
+            dxdy,
+            winding,
+        }
+    }
+
     fn x_at(&self, y: f32) -> f32 {
-        self.x0 + (y - self.y0) * (self.x1 - self.x0) / (self.y1 - self.y0)
+        if y >= self.y1 {
+            self.x1
+        } else {
+            self.x0 + (y - self.y0) * self.dxdy
+        }
     }
 }
 
@@ -196,13 +233,7 @@ fn resolve_non_zero(raster: &mut Rasterizer, lines: &mut [Line]) {
             if (before == 0) != (winding == 0) {
                 // Entering an interval adds coverage, leaving removes it.
                 let dir = if before == 0 { 1 } else { -1 };
-                let piece = Line {
-                    x0: top,
-                    y0: y,
-                    x1: bottom,
-                    y1: y_end,
-                    winding: dir,
-                };
+                let piece = Line::new(top, y, bottom, y_end, dir);
                 emit(raster, &piece, y, y_end, dir);
             }
         }
@@ -233,13 +264,13 @@ impl EdgeSink {
         if y1 <= y0 {
             return;
         }
-        self.lines.push(Line {
-            x0: fixed_to_f32(x0) - self.origin.0,
-            y0: fixed_to_f32(y0) - self.origin.1,
-            x1: fixed_to_f32(x1) - self.origin.0,
-            y1: fixed_to_f32(y1) - self.origin.1,
-            winding: if reversed { -1 } else { 1 },
-        });
+        self.lines.push(Line::new(
+            fixed_to_f32(x0) - self.origin.0,
+            fixed_to_f32(y0) - self.origin.1,
+            fixed_to_f32(x1) - self.origin.0,
+            fixed_to_f32(y1) - self.origin.1,
+            if reversed { -1 } else { 1 },
+        ));
     }
 }
 
