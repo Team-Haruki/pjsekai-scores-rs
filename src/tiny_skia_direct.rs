@@ -1,4 +1,4 @@
-//! Direct PNG/JPEG renderer on tiny-skia + skrifa (feature `image`, on by default).
+//! Direct PNG/JPEG renderer on tiny-skia + skrifa (opt-in feature `image`).
 //!
 //! It replaced the Skia (skia-safe) renderer in 0.6.0. The layout and drawing code
 //! is that renderer's, function by function; the `canvas`, `text`, `aaa` and

@@ -261,7 +261,12 @@ fn write_skia_image_output(
     _score: &mut Score,
     _lyric: Option<&Lyric>,
 ) -> Result<OutputStats, Box<dyn std::error::Error>> {
-    Err("PNG/JPEG output requires building with the `image` feature (on by default)".into())
+    Err(
+        "PNG/JPEG output requires building with the `image` feature; this binary only writes \
+         SVG. Rebuild with `--features image`, e.g. \
+         `cargo install pjsekai-scores-rs --features image`."
+            .into(),
+    )
 }
 
 struct OutputStats {

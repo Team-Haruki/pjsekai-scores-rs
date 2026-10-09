@@ -37,6 +37,8 @@ jobs:
       tag: ${{ needs.gate.outputs.tag }}
       asset-name: "{name}-{label}"
       layout: flat
+      # `image` is opt-in for the library; the released CLI renders PNG/JPEG.
+      features: --features image
 
   wheels:
     name: Wheels

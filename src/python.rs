@@ -195,7 +195,7 @@ fn render_png_bytes(
     _lyric: Option<&Lyric>,
 ) -> PyResult<Vec<u8>> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
-        "PNG/JPEG output requires the `image` feature (on by default); this build has it disabled",
+        "PNG/JPEG output requires the `image` feature; rebuild with `--features python,image` (the PyPI wheels include it)",
     ))
 }
 
@@ -208,7 +208,7 @@ fn render_jpeg_bytes(
     _subsampling: Option<&str>,
 ) -> PyResult<Vec<u8>> {
     Err(pyo3::exceptions::PyRuntimeError::new_err(
-        "PNG/JPEG output requires the `image` feature (on by default); this build has it disabled",
+        "PNG/JPEG output requires the `image` feature; rebuild with `--features python,image` (the PyPI wheels include it)",
     ))
 }
 

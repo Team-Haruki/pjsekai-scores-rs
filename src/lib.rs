@@ -25,7 +25,7 @@ pub use rebase::Rebase;
 pub use score::Score;
 pub use score_json::ScoreJsonError;
 
-// PNG/JPEG/raster rendering (feature `image`, on by default) on tiny-skia + skrifa.
+// PNG/JPEG/raster rendering (opt-in feature `image`) on tiny-skia + skrifa.
 #[cfg(feature = "image")]
 pub use tiny_skia_direct::{
     JpegSubsampling, SkiaDirectError, SkiaImageFormat, SkiaImageOutput, SkiaRasterColorType,

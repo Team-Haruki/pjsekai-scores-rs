@@ -26,25 +26,27 @@ jobs:
       # musl-tools is for the static CLI check in extra-lint-command; DejaVu Sans is the
       # font of the golden crops and of that check.
       apt-packages: musl-tools fonts-dejavu-core
-      # `image` is on by default; python was first compiled at release time before.
+      # The default features are empty (parser + SVG); `image` is opt-in. python + image
+      # is the wheel build.
       feature-sets: |
         default
-        --no-default-features
+        --features image
         --features python
-        --features python,system-fonts
-      # default runs the golden crops and the no-font error path, --no-default-features
-      # the parser/SVG-only build, system-fonts the fontdb fallback.
+        --features python,image,system-fonts
+      # default is the parser/SVG-only build (and the CLI's "rebuild with image" error),
+      # image runs the golden crops and the no-font error path, image,system-fonts the
+      # fontdb fallback.
       test-feature-sets: |
         default
-        --no-default-features
-        --features system-fonts
+        --features image
+        --features image,system-fonts
       targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
       # The image renderer must keep building as a fully static musl CLI (no C or C++,
       # no system libraries); the template has no musl job, so build and run it here.
       extra-lint-command: |
         set -euo pipefail
-        cargo check --locked --target wasm32-unknown-unknown --no-default-features --features wasm
-        cargo build --locked --target x86_64-unknown-linux-musl --features system-fonts
+        cargo check --locked --target wasm32-unknown-unknown --features wasm
+        cargo build --locked --target x86_64-unknown-linux-musl --features image,system-fonts
         bin=target/x86_64-unknown-linux-musl/debug/pjsekai-scores-rs
         file "$bin" | grep -E 'static(-pie)? linked'
         printf '#BPM01: 120\n#00008: 01\n#00012: 14\n#00013: 13\n' > "$RUNNER_TEMP/smoke.sus"
