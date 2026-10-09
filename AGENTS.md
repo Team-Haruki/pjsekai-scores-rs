@@ -200,6 +200,17 @@ The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build
 - For `RasterImage` changes, also build the Skia Python wheel and verify `memoryview(raster).readonly` plus the downstream zero-copy consumer path.
 - When changing CLI/Python options, update `README.md` and `AGENTS.md` in the same docs pass.
 
+## Release notes
+
+Release notes follow the org standard
+[RELEASE_NOTES.md](https://github.com/seiunx-dev/ci-templates/blob/main/RELEASE_NOTES.md),
+written in English.
+
+- Title every release with the tag only, for example `v0.5.0`.
+- Publish tags with an `-alpha`, `-beta` or `-rc` suffix as pre-releases; every other tag is a regular release.
+- Omit empty sections, and end every item with its PR number `(#123)` (short commit SHA when there is no PR).
+- The `Release` workflow publishes auto-generated notes; once it has published, rewrite them to the standard with `gh release edit <tag> --notes-file <file>`.
+
 ---
 
 ## Git commits
@@ -268,7 +279,8 @@ The files in `.github/workflows` are thin callers:
   `release-python.yml` (which rewrote the version from the tag with `sed`). Bump
   `version` in **both** `Cargo.toml` and `pyproject.toml` (and the package's own entry in
   `Cargo.lock`) in a PR → merge and wait for `CI OK` on `main` → push the signed tag
-  `v<version>`. Pushing the tag creates the GitHub Release; do not create it by hand.
+  `v<version>`. Pushing the tag creates the GitHub Release; do not create it by hand, but rewrite
+  its notes afterwards (see [Release notes](#release-notes)).
   `release-gate` refuses a tag that differs from `Cargo.toml`/`pyproject.toml` and waits
   for `CI OK` on the tagged commit. Then, in one run:
   - the CLI binaries `pjsekai-scores-rs-{linux-x64,macos-arm64}.tar.gz` and
