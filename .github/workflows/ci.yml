@@ -56,7 +56,9 @@ jobs:
     name: Wheel smoke
     uses: seiunx-dev/ci-templates/.github/workflows/maturin-wheels.yml@v1
     with:
-      targets: '[{"label":"linux-x64","os":"ubuntu-latest","target":"x86_64"}]'
+      # "test": true is explicit because maturin-wheels@v1 skips the smoke and wheel tests
+      # when it is unset (its `matrix.t.test != false` is false for a missing key).
+      targets: '[{"label":"linux-x64","os":"ubuntu-latest","target":"x86_64","test":true}]'
       interpreters: "3.13" # one wheel for the smoke-test interpreter is enough on PRs
       sdist: false
       smoke-import: pjsekai_scores_rs

@@ -49,13 +49,15 @@ jobs:
       # where the runner/container has it), plus a manylinux_2_28 leg for x86_64 3.14t.
       interpreters: find
       setup-python-versions: "3.9 3.10 3.11 3.12 3.13 3.14 3.14t"
+      # "test": true is explicit on the tested targets because maturin-wheels@v1 skips the
+      # smoke and wheel tests when it is unset (`matrix.t.test != false` is false for null).
       targets: >-
-        [{"label":"linux-x64","os":"ubuntu-latest","target":"x86_64"},
+        [{"label":"linux-x64","os":"ubuntu-latest","target":"x86_64","test":true},
          {"label":"linux-x64-ft","os":"ubuntu-latest","target":"x86_64","manylinux":"2_28","interpreters":"3.14t","test":false},
          {"label":"linux-arm64","os":"ubuntu-latest","target":"aarch64","test":false},
-         {"label":"macos-arm64","os":"macos-15","target":"aarch64-apple-darwin"},
+         {"label":"macos-arm64","os":"macos-15","target":"aarch64-apple-darwin","test":true},
          {"label":"macos-x64","os":"macos-15","target":"x86_64-apple-darwin","test":false},
-         {"label":"windows-x64","os":"windows-latest","target":"x64"}]
+         {"label":"windows-x64","os":"windows-latest","target":"x64","test":true}]
       smoke-import: pjsekai_scores_rs
       # Renders SVG, PNG, JPEG and a raster on every tested target.
       test-command: python -I .github/scripts/wheel_smoke.py
