@@ -1,8 +1,9 @@
 name: Release
 # Replaces release.yml + release-crate.yml + release-python.yml: one tag, one run.
-# PyPI trusted publishing is bound to the workflow FILE: before the first tag, add a trusted
-# publisher for workflow release.yml (environment pypi) on pjsekai-scores-rs and pjsekai-scores-rs-skia-image; the current one
-# names release-python.yml, so the first upload would fail with invalid-publisher.
+# PyPI trusted publishing is bound to the workflow FILE: both PyPI projects this run uploads,
+# pjsekai-scores-rs and the deprecated pjsekai-scores-rs-skia-image shim, need a trusted
+# publisher for this repository, workflow release.yml and environment pypi, or the upload
+# fails with invalid-publisher.
 
 on:
   push:
@@ -43,14 +44,7 @@ jobs:
     uses: seiunx-dev/ci-templates/.github/workflows/maturin-wheels.yml@v1
     with:
       version: ${{ needs.gate.outputs.version }}
-      variants: '["default", "skia-image"]'
-      configure-command: |
-        case "$WHEEL_VARIANT" in
-          skia-image) export PYTHON_PACKAGE_NAME=pjsekai-scores-rs-skia-image MATURIN_FEATURES_TOML='["python", "skia-image"]' ;;
-          *)          export PYTHON_PACKAGE_NAME=pjsekai-scores-rs MATURIN_FEATURES_TOML='["python"]' ;;
-        esac
-        bash .github/scripts/configure-python-package.sh
-      before-script-linux: 'if [ "{variant}" = skia-image ]; then bash .github/scripts/install-skia-linux-deps.sh {target}; fi'
+      # One package; pyproject.toml builds it with features python + image.
       # Same wheel set as release-python.yml: --find-interpreter everywhere (cp39-cp314 + 3.14t
       # where the runner/container has it), plus a manylinux_2_28 leg for x86_64 3.14t.
       interpreters: find
@@ -63,6 +57,31 @@ jobs:
          {"label":"macos-x64","os":"macos-15","target":"x86_64-apple-darwin","test":false},
          {"label":"windows-x64","os":"windows-latest","target":"x64"}]
       smoke-import: pjsekai_scores_rs
+      # Renders SVG, PNG, JPEG and a raster on every tested target.
+      test-command: python -I .github/scripts/wheel_smoke.py
+
+  # Custom job: the deprecated pjsekai-scores-rs-skia-image shim (pure Python, metadata
+  # only, see python/skia-image-shim) has no template. It stays at 0.6.0, so later tags
+  # rebuild the same files and the PyPI job skips them as existing.
+  shim:
+    name: Skia-image shim
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: bash .github/scripts/build-shim.sh dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheels-shim
+          path: dist/
+          retention-days: 3
+          if-no-files-found: error
 
   publish:
     name: GitHub Release
@@ -77,7 +96,7 @@ jobs:
 
   pypi:
     name: PyPI
-    needs: [gate, wheels, publish]
+    needs: [gate, wheels, shim, publish]
     if: needs.gate.outputs.is-tag == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -88,6 +107,7 @@ jobs:
     permissions:
       id-token: write
     steps:
+      # wheels-* holds both projects: pjsekai-scores-rs and the skia-image shim.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: wheels-*

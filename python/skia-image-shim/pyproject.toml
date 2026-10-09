@@ -1,0 +1,33 @@
+# Deprecation shim for the old `pjsekai-scores-rs-skia-image` PyPI project.
+#
+# From 0.6.0 the `pjsekai-scores-rs` wheels always include PNG/JPEG rendering, so the
+# separate Skia package is gone. This metadata-only package keeps old requirements
+# working: it ships no module (the import name `pjsekai_scores_rs` comes from
+# `pjsekai-scores-rs`) and only depends on the replacement. It stays at 0.6.0; later
+# release tags rebuild the same files and the PyPI upload skips them as existing.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pjsekai-scores-rs-skia-image"
+version = "0.6.0"
+description = "Deprecated: install pjsekai-scores-rs, which includes PNG/JPEG rendering since 0.6.0"
+readme = "README.md"
+license = "MIT"
+license-files = []
+requires-python = ">=3.9"
+dependencies = ["pjsekai-scores-rs>=0.6.0"]
+classifiers = [
+    "Development Status :: 7 - Inactive",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://github.com/Team-Haruki/pjsekai-scores-rs"
+Changelog = "https://github.com/Team-Haruki/pjsekai-scores-rs/releases"
+
+[tool.setuptools]
+packages = []
+py-modules = []

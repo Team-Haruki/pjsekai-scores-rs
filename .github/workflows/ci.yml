@@ -23,27 +23,28 @@ jobs:
     uses: seiunx-dev/ci-templates/.github/workflows/rust-ci.yml@v1
     with:
       coverage: true
-      # musl-tools and DejaVu are for the static tiny-skia CLI check in extra-lint-command.
-      apt-packages: libfontconfig1-dev libfreetype-dev musl-tools fonts-dejavu-core
-      # python + skia-image were first compiled at release time before; lint them on every PR
+      # musl-tools is for the static CLI check in extra-lint-command; DejaVu Sans is the
+      # font of the golden crops and of that check.
+      apt-packages: musl-tools fonts-dejavu-core
+      # `image` is on by default; python was first compiled at release time before.
       feature-sets: |
         default
-        --features python,skia-image
-        --features python,tiny-skia-image
-        --features python,tiny-skia-image,system-fonts
-      # tiny-skia alone runs the golden crops and the no-font error path; both raster
-      # backends together run the tiny-skia vs Skia similarity tests.
+        --no-default-features
+        --features python
+        --features python,system-fonts
+      # default runs the golden crops and the no-font error path, --no-default-features
+      # the parser/SVG-only build, system-fonts the fontdb fallback.
       test-feature-sets: |
         default
-        --features tiny-skia-image
-        --features skia-image,tiny-skia-image,system-fonts
+        --no-default-features
+        --features system-fonts
       targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
-      # The tiny-skia backend must keep building as a fully static musl CLI (no C++,
+      # The image renderer must keep building as a fully static musl CLI (no C or C++,
       # no system libraries); the template has no musl job, so build and run it here.
       extra-lint-command: |
         set -euo pipefail
         cargo check --locked --target wasm32-unknown-unknown --no-default-features --features wasm
-        cargo build --locked --target x86_64-unknown-linux-musl --features tiny-skia-image,system-fonts
+        cargo build --locked --target x86_64-unknown-linux-musl --features system-fonts
         bin=target/x86_64-unknown-linux-musl/debug/pjsekai-scores-rs
         file "$bin" | grep -E 'static(-pie)? linked'
         printf '#BPM01: 120\n#00008: 01\n#00012: 14\n#00013: 13\n' > "$RUNNER_TEMP/smoke.sus"
@@ -56,19 +57,26 @@ jobs:
     uses: seiunx-dev/ci-templates/.github/workflows/maturin-wheels.yml@v1
     with:
       targets: '[{"label":"linux-x64","os":"ubuntu-latest","target":"x86_64"}]'
-      # tiny-skia-image is smoke-built only (experimental; not published by release.yml).
-      variants: '["default", "skia-image", "tiny-skia-image"]'
-      configure-command: |
-        case "$WHEEL_VARIANT" in
-          skia-image) export PYTHON_PACKAGE_NAME=pjsekai-scores-rs-skia-image MATURIN_FEATURES_TOML='["python", "skia-image"]' ;;
-          tiny-skia-image) export PYTHON_PACKAGE_NAME=pjsekai-scores-rs-tiny-skia-image MATURIN_FEATURES_TOML='["python", "tiny-skia-image", "system-fonts"]' ;;
-          *)          export PYTHON_PACKAGE_NAME=pjsekai-scores-rs MATURIN_FEATURES_TOML='["python"]' ;;
-        esac
-        bash .github/scripts/configure-python-package.sh
-      before-script-linux: 'if [ "{variant}" = skia-image ]; then bash .github/scripts/install-skia-linux-deps.sh {target}; fi'
       interpreters: "3.13" # one wheel for the smoke-test interpreter is enough on PRs
       sdist: false
       smoke-import: pjsekai_scores_rs
+      # Renders SVG, PNG, JPEG and a raster through the installed wheel.
+      test-command: python -I .github/scripts/wheel_smoke.py
+
+  # Custom job: the deprecated pjsekai-scores-rs-skia-image shim is a pure-Python
+  # package, which no template builds. Same script as release.yml.
+  shim:
+    name: Skia-image shim
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - run: bash .github/scripts/build-shim.sh "$RUNNER_TEMP/shim-dist"
 
   sonar:
     name: Sonar
@@ -86,7 +94,7 @@ jobs:
   ci-ok:
     name: CI OK # the only required status check
     if: always()
-    needs: [rust, wheel-smoke, sonar, workflows]
+    needs: [rust, wheel-smoke, shim, sonar, workflows]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
