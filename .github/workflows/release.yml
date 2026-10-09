@@ -141,9 +141,9 @@ jobs:
           cache: "false"
       - uses: seiunx-dev/ci-templates/actions/cargo-publish@v1
         with:
-          # Library first: the CLI crate depends on it (`=` the same version). The token
-          # (environment crates-io) must cover both crates; publishing a crate name for the
-          # first time (pjsekai-scores-rs-cli in 0.6.0) needs its publish-new scope.
+          # Library first: the CLI crate depends on it (`=` the same version). The token (the
+          # repository secret CARGO_REGISTRY_TOKEN) must cover both crates; publishing a crate
+          # name for the first time (pjsekai-scores-rs-cli in 0.6.0) needs its publish-new scope.
           packages: |
             pjsekai-scores-rs
             pjsekai-scores-rs-cli
