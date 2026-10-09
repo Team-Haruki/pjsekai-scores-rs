@@ -212,7 +212,7 @@ import pjsekai_scores_rs
 
 The wheels need no system libraries. They have no system-font fallback: pass the fonts to draw text with in `font_paths` / `font_dirs` (rendering text without any font raises an error).
 
-`pjsekai-scores-rs-skia-image`, the separate Skia image package of 0.5.x and earlier, is deprecated. Its 0.6.0 release contains no code and only depends on `pjsekai-scores-rs>=0.6.0`, so old requirements keep working; depend on `pjsekai-scores-rs` instead.
+`pjsekai-scores-rs-skia-image`, the separate Skia image package of 0.5.x and earlier, is deprecated. Its 0.6.0 release contains no code and only depends on `pjsekai-scores-rs>=0.6.0`, so old requirements keep working; depend on `pjsekai-scores-rs` instead. When pip upgrades an environment that has the 0.5 `pjsekai-scores-rs-skia-image` wheel in place, removing that wheel's files also deletes the `pjsekai_scores_rs` module: run `pip uninstall pjsekai-scores-rs-skia-image` before upgrading, or `pip install --force-reinstall --no-deps pjsekai-scores-rs` afterwards (uv and fresh environments are not affected).
 
 Or build and install from source (requires [maturin](https://github.com/PyO3/maturin)):
 
