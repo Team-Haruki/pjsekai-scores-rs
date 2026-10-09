@@ -1,6 +1,6 @@
 # pjsekai-scores-rs
 
-Project SEKAI score (`.sus`) parser, SVG chart renderer, and direct Skia image renderer, rewritten in Rust.
+Project SEKAI score (`.sus`) parser, SVG chart renderer, and direct PNG/JPEG renderer, rewritten in Rust.
 
 - Original Python project: [pjsekai/scores](https://gitlab.com/pjsekai/scores)
 - Skill information previewer based on [xfl03's fork](https://github.com/xfl03/SekaiMusicChart)
@@ -9,8 +9,8 @@ Project SEKAI score (`.sus`) parser, SVG chart renderer, and direct Skia image r
 
 - Parses `.sus` score files and Project SEKAI custom chart JSON
 - Generates SVG chart images with full note rendering (Tap / Directional / Slide)
-- Generates PNG/JPEG chart images directly with Skia, without SVG rasterization
-- Honors CSS `font-family` in Skia image output, with custom font files/directories for CJK and JP fonts
+- Generates PNG/JPEG chart images directly, without SVG rasterization, on a pure-Rust renderer (tiny-skia + skrifa) that reproduces the Linux Skia output of earlier releases
+- Honors CSS `font-family` in image output, with custom font files/directories for CJK and JP fonts
 - BPM rebase support (custom timing via JSON)
 - Lyric overlay support
 - Skill/Fever cover overlay support
@@ -47,12 +47,12 @@ Options:
       --rebase <REBASE>          Customized BPM, beats and sections (JSON)
       --lyric <LYRIC>            Lyrics file
       --css <CSS>                Custom CSS stylesheet
-      --note-host <NOTE_HOST>    Base URL for SVG note assets, or local directory for Skia image note assets
+      --note-host <NOTE_HOST>    Base URL for SVG note assets, or local directory for PNG/JPEG note assets
                                  [default: https://asset3.pjsekai.moe/live/note/custom01]
       --note-asset-extension <NOTE_ASSET_EXTENSION>
                                  File extension for note asset files [default: png]
-      --font-path <FONT_PATHS>   Font file path to load for Skia image output; may be repeated
-      --font-dir <FONT_DIRS>     Directory containing .ttf/.otf/.ttc fonts for Skia image output; may be repeated
+      --font-path <FONT_PATHS>   Font file path to load for PNG/JPEG output; may be repeated
+      --font-dir <FONT_DIRS>     Directory containing .ttf/.otf/.ttc fonts for PNG/JPEG output; may be repeated
       --title <TITLE>            Music title shown in the chart footer
       --artist <ARTIST>          Music artist shown in the chart footer
       --difficulty <DIFFICULTY>  Difficulty shown in the chart footer
@@ -86,13 +86,13 @@ pjsekai-scores-rs master.sus --rebase rebase.json --lyric lyrics.txt -o master.s
 # SVG with custom CSS theme and local note assets
 pjsekai-scores-rs master.sus --css dark.css --note-host /path/to/notes -o master.svg
 
-# PNG via direct Skia rendering. Build with --features skia-image.
+# PNG via direct rendering.
 pjsekai-scores-rs master.sus --css dark.css --note-host /path/to/notes -o master.png
 
-# JPEG via direct Skia rendering. JPEG quality defaults to 90.
+# JPEG via direct rendering. JPEG quality defaults to 90.
 pjsekai-scores-rs master.sus --css dark.css --note-host /path/to/notes --jpeg-quality 92 -o master.jpg
 
-# Skia output with CSS-declared fonts. Build with --features skia-image.
+# Image output with CSS-declared fonts.
 pjsekai-scores-rs master.sus \
   --css black.css \
   --note-host /path/to/chart_asset/notes \
@@ -166,14 +166,28 @@ let svg = drawing.svg(&mut rebased, None);
 ### Building (Rust only)
 
 ```bash
-# Standard CLI: SVG output only
+# CLI with SVG and PNG/JPEG output (the `image` feature is on by default)
 cargo build --release --bin pjsekai-scores-rs
 
-# Skia CLI: SVG output + direct PNG/JPEG output
-cargo build --release --features skia-image --bin pjsekai-scores-rs
+# Also resolve CSS font families from the system fonts
+cargo build --release --features system-fonts --bin pjsekai-scores-rs
+
+# Parser + SVG renderer only
+cargo build --release --no-default-features --bin pjsekai-scores-rs
 ```
 
-GitHub releases ship only the standard CLI (SVG output) for linux-x64, macos-arm64 and windows-x64. Build the Skia CLI from source with `--features skia-image` when you need PNG/JPEG output.
+Everything is pure Rust: no C/C++ toolchain, no Skia download and no FreeType, fontconfig or zlib from the system, so the CLI also builds as a static musl binary. GitHub releases ship the default CLI (SVG, PNG and JPEG output) for linux-x64, macos-arm64 and windows-x64.
+
+### Cargo features
+
+| Feature | Default | What it adds |
+|---|---|---|
+| `image` | yes | PNG/JPEG/raster output (tiny-skia, skrifa, png with zlib-rs, zune-jpeg, mozjpeg-rs) |
+| `system-fonts` | no | With `image`: CSS font families that are not in `font_paths` / `font_dirs` resolve from the system fonts (fontdb) |
+| `python` | no | PyO3 bindings (the PyPI wheels use `python` + `image`) |
+| `wasm` | no | `wasm-bindgen` bindings; build with `--no-default-features --features wasm` |
+
+`--no-default-features` gives the parser and SVG renderer only. 0.6.0 removed the Skia (`skia-safe`) renderer and the `skia-image` feature; `image` replaces it with the same Rust and Python API.
 
 ---
 
@@ -182,44 +196,34 @@ GitHub releases ship only the standard CLI (SVG output) for linux-x64, macos-arm
 ### Installation
 
 ```bash
-# Default package: parser + SVG renderer.
+# Parser + SVG renderer + direct PNG/JPEG output.
 pip install pjsekai-scores-rs
-
-# Skia package: parser + SVG renderer + direct PNG/JPEG output.
-pip install pjsekai-scores-rs-skia-image
 ```
 
 or with uv:
 
 ```bash
-# Default package: parser + SVG renderer.
 uv add pjsekai-scores-rs
-
-# Skia package: parser + SVG renderer + direct PNG/JPEG output.
-uv add pjsekai-scores-rs-skia-image
 ```
-
-Both packages expose the same Python module name:
 
 ```python
 import pjsekai_scores_rs
 ```
 
-Install one package or the other in an environment. The `pjsekai-scores-rs-skia-image` package is the optional image-output build; installing both packages at once is not supported because they provide the same extension module.
+The wheels need no system libraries. They have no system-font fallback: pass the fonts to draw text with in `font_paths` / `font_dirs` (rendering text without any font raises an error).
+
+`pjsekai-scores-rs-skia-image`, the separate Skia image package of 0.5.x and earlier, is deprecated. Its 0.6.0 release contains no code and only depends on `pjsekai-scores-rs>=0.6.0`, so old requirements keep working; depend on `pjsekai-scores-rs` instead.
 
 Or build and install from source (requires [maturin](https://github.com/PyO3/maturin)):
 
 ```bash
-# Default wheel: Python bindings without Skia image output support.
+# The same build as the published wheels (features python + image).
 maturin develop --release
-
-# Skia image wheel (the same build as the pjsekai-scores-rs-skia-image package).
-maturin develop --release --features python,skia-image
 ```
 
 ### WebAssembly
 
-The `wasm` feature exposes the parser, timing APIs, rebase transform, lyric parser, and SVG renderer through `wasm-bindgen`. It intentionally does not include `skia-image`; browser and worker builds should render SVG directly or let the host application rasterize it.
+The `wasm` feature exposes the parser, timing APIs, rebase transform, lyric parser, and SVG renderer through `wasm-bindgen`. It is built with `--no-default-features`, so it does not include `image`; browser and worker builds should render SVG directly or let the host application rasterize it.
 
 Build with [wasm-pack](https://rustwasm.github.io/wasm-pack/):
 
@@ -257,7 +261,7 @@ The wasm API accepts in-memory strings instead of file paths. Use `Score.fromSus
 
 #### Score loading
 
-`Score` is the shared parsed chart type used by SVG, Skia PNG/JPEG, timing APIs, and rebase. It accepts both `.sus` and Project SEKAI custom chart JSON.
+`Score` is the shared parsed chart type used by SVG, PNG/JPEG, timing APIs, and rebase. It accepts both `.sus` and Project SEKAI custom chart JSON.
 
 ```python
 import pjsekai_scores_rs as scores
@@ -359,7 +363,7 @@ lyric.word_count()  # -> int
 
 #### Drawing
 
-`Drawing` can render any `Score`, whether it came from SUS or JSON. `png()`, `jpg()`, `jpeg()`, and `raster()` require the `pjsekai-scores-rs-skia-image` package or a local build with `--features python,skia-image`.
+`Drawing` can render any `Score`, whether it came from SUS or JSON. `png()`, `jpg()`, `jpeg()`, and `raster()` need at least one font in `font_paths` / `font_dirs`.
 
 ```python
 drawing = scores.Drawing(
@@ -403,11 +407,11 @@ assert raster.nbytes == raster.row_bytes * raster.height
 pixel_view = memoryview(raster)  # read-only; no PNG encode or pixel copy
 ```
 
-`RasterImage` owns the Skia pixel allocation and exports it through Python's read-only buffer protocol. Its `color_type` is `"rgba8888"` or `"bgra8888"`, and `alpha_type` is `"premul"`. Keep the object alive while a consumer borrows its buffer; use `to_bytes()` only when an owned copy is actually required.
+`RasterImage` owns the pixel allocation and exports it through Python's read-only buffer protocol. Its `color_type` is `"rgba8888"` (consumers should still accept `"bgra8888"`), and `alpha_type` is `"premul"`. Keep the object alive while a consumer borrows its buffer; use `to_bytes()` only when an owned copy is actually required.
 
-`font_paths` and `font_dirs` only affect direct Skia PNG/JPEG rendering. SVG output keeps CSS as text and lets the viewer resolve fonts. For services, prefer explicit `font_paths` over broad `font_dirs`: directory inputs are scanned recursively before rendering, while loaded custom typefaces are cached per process by font path, modified time, and file size.
+`font_paths` and `font_dirs` only affect direct PNG/JPEG rendering. SVG output keeps CSS as text and lets the viewer resolve fonts. For services, prefer explicit `font_paths` over broad `font_dirs`: directory inputs are scanned recursively before rendering, while loaded custom typefaces are cached per process by font path, modified time, and file size.
 
-Skia image output parses CSS `font-family` declarations from the built-in theme plus `style_sheet`. It can match system fonts or custom fonts loaded from `font_paths` / `font_dirs`, including family names such as `Source Han Sans SC` and `FOT-RodinNTLG Pro DB`. When CJK glyphs are present, the renderer only uses a candidate typeface if it covers the required glyphs, then falls back to another matching custom/system font.
+Image output parses CSS `font-family` declarations from the built-in theme plus `style_sheet`. It matches custom fonts loaded from `font_paths` / `font_dirs` (and system fonts in builds with the `system-fonts` feature), including family names such as `Source Han Sans SC` and `FOT-RodinNTLG Pro DB`. When CJK glyphs are present, the renderer only uses a candidate typeface if it covers the required glyphs, then falls back to another matching font, and finally to any registered font.
 
 Custom font paths can also be changed after construction:
 
@@ -481,14 +485,11 @@ with open("master.jpg", "wb") as f:
 ### Current platform
 
 ```bash
-# Default wheel: SVG renderer and parser.
+# Parser, SVG renderer and PNG/JPEG renderer (features python + image).
 maturin build --release
-
-# Optional wheel with direct Skia PNG/JPEG rendering.
-maturin build --release --features python,skia-image
 ```
 
-The release workflow publishes that Skia-enabled build under the separate distribution name `pjsekai-scores-rs-skia-image` while keeping the import module as `pjsekai_scores_rs`.
+The release workflow publishes this build as `pjsekai-scores-rs`, plus the metadata-only `pjsekai-scores-rs-skia-image` 0.6.0 deprecation shim from `python/skia-image-shim/`.
 
 ### Cross-compile for Linux x64 (from macOS/Windows, requires [zig](https://ziglang.org))
 
@@ -502,8 +503,6 @@ PYO3_CROSS=1 PYO3_CROSS_PYTHON_VERSION=3.13 \
   maturin build --release --target x86_64-unknown-linux-gnu --zig -i python3.13
 ```
 
-Add `--features python,skia-image` to build an optional Skia image wheel from source.
-
 ### Cross-compile for Windows x64 (requires MinGW `x86_64-w64-mingw32-gcc`)
 
 ```bash
@@ -511,17 +510,17 @@ PYO3_CROSS=1 PYO3_CROSS_PYTHON_VERSION=3.14 \
   maturin build --release --target x86_64-pc-windows-gnu -i python3.14t
 ```
 
-Add `--features python,skia-image` to build an optional Skia image wheel from source.
-
 ---
 
 ## Project Structure
 
 ```
 pjsekai-scores-rs/
-├── Cargo.toml          # Rust package manifest + PyO3/Skia feature flags
+├── Cargo.toml          # Rust package manifest + feature flags (image, system-fonts, python, wasm)
 ├── pyproject.toml      # maturin build config (module name: pjsekai_scores_rs)
 ├── css/                # CSS themes; default.css is built in, black/white/guess/color are for --css
+├── python/skia-image-shim/  # deprecated metadata-only pjsekai-scores-rs-skia-image package
+├── tests/              # core flows; image_render.rs + golden/ for PNG/JPEG output
 └── src/
     ├── main.rs         # CLI entry point (clap)
     ├── lib.rs          # Crate root + PyO3 module registration
@@ -533,10 +532,9 @@ pjsekai-scores-rs/
     ├── lyric.rs        # Lyric / Word structs + parser
     ├── rebase.rs       # BPM/timing rebase transformation
     ├── drawing.rs      # SVG renderer (direct String building)
-    ├── skia_direct.rs  # Direct Skia PNG/JPEG renderer
-    ├── tiny_skia_direct.rs # Experimental pure-Rust mirror of skia_direct.rs (tiny-skia + skrifa)
-    ├── tiny_skia_direct/   # canvas.rs, aaa.rs + raster.rs (Skia-style AA), text.rs (skrifa fonts), codec.rs (png/zune-jpeg/mozjpeg-rs)
-    ├── python.rs       # PyO3 bindings (Fraction, Meta, Event, Score, Lyric, Rebase, Drawing; RasterImage with skia-image)
+    ├── tiny_skia_direct.rs # Direct PNG/JPEG renderer (tiny-skia + skrifa)
+    ├── tiny_skia_direct/   # canvas.rs, aaa.rs + raster.rs (Skia-style AA), text.rs (skrifa fonts), codec.rs (png/zune-jpeg/mozjpeg-rs), system_fonts.rs
+    ├── python.rs       # PyO3 bindings (Fraction, Meta, Event, Score, Lyric, Rebase, Drawing, RasterImage)
     ├── wasm.rs         # wasm-bindgen bindings (Score, Drawing, Rebase, Lyric)
     ├── notes.rs        # NoteData enum + NoteBase + arena index pattern
     └── notes/
@@ -550,12 +548,12 @@ pjsekai-scores-rs/
 
 - The `python` feature gate enables PyO3. Without it, the crate builds as a pure Rust library + CLI binary with no Python dependency.
 - `Score::open()` and `Score::parse_auto()` auto-detect JSON-looking custom chart input; use `Score::open_sus()` / `Score::parse()` or `Score::open_json()` / `Score::parse_json()` to force a format.
-- The `wasm` feature enables `wasm-bindgen` exports for in-memory parsing and SVG rendering. It is independent from `python` and `skia-image`; do not use local file-path APIs in browser builds.
-- The `skia-image` feature enables direct PNG/JPEG output. The default `pjsekai-scores-rs` wheel omits it; install `pjsekai-scores-rs-skia-image` (or build from source with `--features python,skia-image`) when image bytes are needed.
-- The experimental `tiny-skia-image` feature provides the same PNG/JPEG/`raster()` API on a pure-Rust backend (tiny-skia + skrifa): no C++ toolchain, no prebuilt Skia download, no fontconfig/freetype, and it builds as a static musl binary. When `skia-image` is also enabled, Skia stays behind the crate-level API and the tiny-skia renderer is reachable as `pjsekai_scores_rs::tiny_skia_direct`. Text uses the fonts from `font_paths` / `font_dirs`; build it with the `system-fonts` feature as well (`--features tiny-skia-image,system-fonts`) to resolve other CSS families, including generic ones such as `sans-serif`, from the system fonts the way Skia does (via fontdb, scanned once per process on first use). Without registered fonts and without `system-fonts`, rendering fails with a "no fonts to draw text with" error instead of drawing a chart without text. Its JPEG output (mozjpeg-rs) matches libjpeg-turbo's, its raster is always `rgba8888` premultiplied, and the Python module reports the active backend in `pjsekai_scores_rs.RASTER_BACKEND`. Set `PJSEKAI_SCORES_TINY_SKIA_HINTING=0` to draw unhinted glyph outlines.
-- Skia image output parses CSS colors, font sizes, font weights, and `font-family`. Use `font_paths` / `font_dirs` or CLI `--font-path` / `--font-dir` when deployment fonts should not depend on the host system.
+- The `wasm` feature enables `wasm-bindgen` exports for in-memory parsing and SVG rendering. It is independent from `python` and `image`; do not use local file-path APIs in browser builds.
+- The `image` feature (on by default) enables direct PNG/JPEG output and `Drawing.raster()` on a pure-Rust renderer: tiny-skia for pixels, skrifa for fonts. It emulates what Skia rasterized on Linux (analytic anti-aliasing, FreeType-style glyph masks), so output stays close to the Skia renderer it replaced in 0.6.0. It needs no C/C++ toolchain and no system libraries, and builds as a static musl binary. Its raster is always `rgba8888` premultiplied, and the Python module reports the renderer in `pjsekai_scores_rs.RASTER_BACKEND` (`"tiny-skia"`). Set `PJSEKAI_SCORES_TINY_SKIA_HINTING=0` to draw unhinted glyph outlines.
+- Text uses the fonts from `font_paths` / `font_dirs` (CLI `--font-path` / `--font-dir`). The `system-fonts` feature (`--features system-fonts`, not in the PyPI wheels) also resolves other CSS families, including generic ones such as `sans-serif`, from the system fonts via fontdb, scanned once per process on first use. Without registered fonts and without `system-fonts`, rendering fails with a "no fonts to draw text with" error instead of drawing a chart without text.
+- Image output parses CSS colors, font sizes, font weights, and `font-family`.
 - `--perf` reports render, layout, setup, draw, encode, copy, write, and total timings. PNG encoding is lossless and can be much slower than JPEG on large charts.
-- Direct PNG output uses the multithreaded `mtpng` fast encoder by default. Set `PJSEKAI_SCORES_PNG_ENCODER=skia` to restore the Skia encoder for diagnostics, and `PJSEKAI_SCORES_PROFILE=1` to log per-render phase timings.
+- PNG output uses the `png` crate (Up filter, zlib-rs deflate level 2); JPEG output uses mozjpeg-rs in its libjpeg-turbo-compatible mode. Set `PJSEKAI_SCORES_PROFILE=1` to log per-render phase timings.
 - `Drawing.raster()` renders directly into a read-only native N32 buffer. It is intended for in-process consumers that can compose the pixels without an intermediate PNG encode/decode cycle.
 - All `#[pyclass]` types are `Send + Sync` (no `Rc`/`RefCell`), satisfying Python 3.13t / 3.14t free-threaded requirements.
 - The default CSS theme is embedded at compile time via `include_str!` — no runtime file lookup required. To use another theme from `css/`, pass it as a custom stylesheet (CLI `--css`, Python `style_sheet=`); it is appended after the default theme.
