@@ -35,6 +35,14 @@ The dominant win is SVG generation: Rust replaces thousands of Python `svgwrite`
 
 ## CLI Usage
 
+Install the CLI with image output (the `image` feature is opt-in):
+
+```bash
+cargo install pjsekai-scores-rs --features image
+```
+
+Prebuilt binaries for linux-x64, macos-arm64 and windows-x64 on the GitHub releases already include it. A plain `cargo install pjsekai-scores-rs` builds an SVG-only CLI; asking it for `.png` / `.jpg` output fails with a message to rebuild with `--features image`.
+
 ```
 Usage: pjsekai-scores-rs [OPTIONS] <SCORE>
 
@@ -124,7 +132,8 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-pjsekai-scores-rs = { path = "./pjsekai-scores-rs" }
+pjsekai-scores-rs = "0.6"                                          # parser + SVG renderer
+# pjsekai-scores-rs = { version = "0.6", features = ["image"] }    # + PNG/JPEG/raster output
 ```
 
 ### Basic example
@@ -166,28 +175,28 @@ let svg = drawing.svg(&mut rebased, None);
 ### Building (Rust only)
 
 ```bash
-# CLI with SVG and PNG/JPEG output (the `image` feature is on by default)
-cargo build --release --bin pjsekai-scores-rs
+# CLI with SVG and PNG/JPEG output (what the GitHub releases ship)
+cargo build --release --features image --bin pjsekai-scores-rs
 
 # Also resolve CSS font families from the system fonts
-cargo build --release --features system-fonts --bin pjsekai-scores-rs
+cargo build --release --features image,system-fonts --bin pjsekai-scores-rs
 
-# Parser + SVG renderer only
-cargo build --release --no-default-features --bin pjsekai-scores-rs
+# Parser + SVG renderer only (the default features)
+cargo build --release --bin pjsekai-scores-rs
 ```
 
-Everything is pure Rust: no C/C++ toolchain, no Skia download and no FreeType, fontconfig or zlib from the system, so the CLI also builds as a static musl binary. GitHub releases ship the default CLI (SVG, PNG and JPEG output) for linux-x64, macos-arm64 and windows-x64.
+Everything is pure Rust: no C/C++ toolchain, no Skia download and no FreeType, fontconfig or zlib from the system, so the CLI also builds as a static musl binary. GitHub releases ship the CLI built with `--features image` (SVG, PNG and JPEG output) for linux-x64, macos-arm64 and windows-x64.
 
 ### Cargo features
 
 | Feature | Default | What it adds |
 |---|---|---|
-| `image` | yes | PNG/JPEG/raster output (tiny-skia, skrifa, png with zlib-rs, zune-jpeg, mozjpeg-rs) |
+| `image` | no | PNG/JPEG/raster output (tiny-skia, skrifa, png with zlib-rs, zune-jpeg, mozjpeg-rs); the PyPI wheels and the release CLI binaries include it |
 | `system-fonts` | no | With `image`: CSS font families that are not in `font_paths` / `font_dirs` resolve from the system fonts (fontdb) |
 | `python` | no | PyO3 bindings (the PyPI wheels use `python` + `image`) |
-| `wasm` | no | `wasm-bindgen` bindings; build with `--no-default-features --features wasm` |
+| `wasm` | no | `wasm-bindgen` bindings; build with `--features wasm` |
 
-`--no-default-features` gives the parser and SVG renderer only. 0.6.0 removed the Skia (`skia-safe`) renderer and the `skia-image` feature; `image` replaces it with the same Rust and Python API.
+The default features are empty: the parser and SVG renderer. 0.6.0 removed the Skia (`skia-safe`) renderer and the `skia-image` feature; the opt-in `image` feature replaces it with the same Rust and Python API.
 
 ---
 
@@ -223,19 +232,19 @@ maturin develop --release
 
 ### WebAssembly
 
-The `wasm` feature exposes the parser, timing APIs, rebase transform, lyric parser, and SVG renderer through `wasm-bindgen`. It is built with `--no-default-features`, so it does not include `image`; browser and worker builds should render SVG directly or let the host application rasterize it.
+The `wasm` feature exposes the parser, timing APIs, rebase transform, lyric parser, and SVG renderer through `wasm-bindgen`. It does not include `image`; browser and worker builds should render SVG directly or let the host application rasterize it.
 
 Build with [wasm-pack](https://rustwasm.github.io/wasm-pack/):
 
 ```bash
-wasm-pack build --release --target web --no-default-features --features wasm
+wasm-pack build --release --target web --features wasm
 ```
 
 Or check the core wasm target directly:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo check --target wasm32-unknown-unknown --no-default-features --features wasm --lib
+cargo check --target wasm32-unknown-unknown --features wasm --lib
 ```
 
 Example browser usage:
@@ -549,8 +558,8 @@ pjsekai-scores-rs/
 - The `python` feature gate enables PyO3. Without it, the crate builds as a pure Rust library + CLI binary with no Python dependency.
 - `Score::open()` and `Score::parse_auto()` auto-detect JSON-looking custom chart input; use `Score::open_sus()` / `Score::parse()` or `Score::open_json()` / `Score::parse_json()` to force a format.
 - The `wasm` feature enables `wasm-bindgen` exports for in-memory parsing and SVG rendering. It is independent from `python` and `image`; do not use local file-path APIs in browser builds.
-- The `image` feature (on by default) enables direct PNG/JPEG output and `Drawing.raster()` on a pure-Rust renderer: tiny-skia for pixels, skrifa for fonts. It emulates what Skia rasterized on Linux (analytic anti-aliasing, FreeType-style glyph masks), so output stays close to the Skia renderer it replaced in 0.6.0. It needs no C/C++ toolchain and no system libraries, and builds as a static musl binary. Its raster is always `rgba8888` premultiplied, and the Python module reports the renderer in `pjsekai_scores_rs.RASTER_BACKEND` (`"tiny-skia"`). Set `PJSEKAI_SCORES_TINY_SKIA_HINTING=0` to draw unhinted glyph outlines.
-- Text uses the fonts from `font_paths` / `font_dirs` (CLI `--font-path` / `--font-dir`). The `system-fonts` feature (`--features system-fonts`, not in the PyPI wheels) also resolves other CSS families, including generic ones such as `sans-serif`, from the system fonts via fontdb, scanned once per process on first use. Without registered fonts and without `system-fonts`, rendering fails with a "no fonts to draw text with" error instead of drawing a chart without text.
+- The opt-in `image` feature enables direct PNG/JPEG output and `Drawing.raster()` on a pure-Rust renderer: tiny-skia for pixels, skrifa for fonts. It emulates what Skia rasterized on Linux (analytic anti-aliasing, FreeType-style glyph masks), so output stays close to the Skia renderer it replaced in 0.6.0. It needs no C/C++ toolchain and no system libraries, and builds as a static musl binary. Its raster is always `rgba8888` premultiplied, and the Python module reports the renderer in `pjsekai_scores_rs.RASTER_BACKEND` (`"tiny-skia"`). Set `PJSEKAI_SCORES_TINY_SKIA_HINTING=0` to draw unhinted glyph outlines.
+- Text uses the fonts from `font_paths` / `font_dirs` (CLI `--font-path` / `--font-dir`). The `system-fonts` feature (`--features image,system-fonts`, not in the PyPI wheels or release binaries) also resolves other CSS families, including generic ones such as `sans-serif`, from the system fonts via fontdb, scanned once per process on first use. Without registered fonts and without `system-fonts`, rendering fails with a "no fonts to draw text with" error instead of drawing a chart without text.
 - Image output parses CSS colors, font sizes, font weights, and `font-family`.
 - `--perf` reports render, layout, setup, draw, encode, copy, write, and total timings. PNG encoding is lossless and can be much slower than JPEG on large charts.
 - PNG output uses the `png` crate (Up filter, zlib-rs deflate level 2); JPEG output uses mozjpeg-rs in its libjpeg-turbo-compatible mode. Set `PJSEKAI_SCORES_PROFILE=1` to log per-render phase timings.

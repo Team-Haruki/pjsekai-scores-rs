@@ -13,20 +13,22 @@ The original Python implementation lives at `../scores/` and is the reference fo
 ## Build commands
 
 ```bash
-# Rust only (crate + CLI); the `image` feature (PNG/JPEG/raster) is on by default
-cargo build --release
-cargo build --release --features system-fonts           # + fontdb system font fallback
-cargo build --release --no-default-features             # parser + SVG renderer only
+# Rust only (crate + CLI). Default features are empty (parser + SVG); `image` adds PNG/JPEG/raster
+cargo build --release                                   # parser + SVG renderer only
+cargo build --release --features image                  # what the release CLI binaries ship
+cargo build --release --features image,system-fonts     # + fontdb system font fallback
+cargo install pjsekai-scores-rs --features image        # CLI with image output from crates.io
 cargo check
 cargo check --features python
-cargo check --target wasm32-unknown-unknown --no-default-features --features wasm --lib
-cargo test                                    # golden crops need Linux + DejaVu Sans
-cargo test --no-default-features
-cargo test --features system-fonts
+cargo check --target wasm32-unknown-unknown --features wasm --lib
+cargo test
+cargo test --features image                   # golden crops need Linux + DejaVu Sans
+cargo test --features image,system-fonts
 cargo test <test_name>                        # single test
 cargo clippy --all-targets -- -D warnings     # CI requires clean (default features)
-cargo clippy --all-targets --no-default-features -- -D warnings          # CI requires clean
-cargo clippy --all-targets --features python,system-fonts -- -D warnings  # CI requires clean
+cargo clippy --all-targets --features image -- -D warnings                      # CI requires clean
+cargo clippy --all-targets --features python -- -D warnings                     # CI requires clean
+cargo clippy --all-targets --features python,image,system-fonts -- -D warnings  # CI requires clean
 cargo fmt --all --check                       # CI requires clean
 cargo fmt                                     # auto-format
 
@@ -36,7 +38,7 @@ maturin build --release
 maturin develop --release
 
 # WebAssembly (SVG only; no image)
-wasm-pack build --release --target web --no-default-features --features wasm
+wasm-pack build --release --target web --features wasm
 
 # Python 3.14t free-threaded wheel (macOS ARM64)
 maturin build --release -i python3.14t
@@ -94,7 +96,7 @@ python/skia-image-shim/  Deprecated `pjsekai-scores-rs-skia-image` package: meta
 `Score` implements `std::str::FromStr`. Use `Score::parse(content)` as the public Rust method, or `content.parse::<Score>()` via the trait. The Python binding `Score.from_str(s)` delegates to `s.parse::<Score>().unwrap()`.
 
 ### WebAssembly API
-The `wasm` feature is independent from `python` and `image`, and is built with `--no-default-features`. It exposes `Score`, `Drawing`, `Rebase`, and `Lyric` through `wasm-bindgen` for in-memory `.sus` / custom-chart JSON parsing and SVG string output. Keep browser-facing APIs content-based (`Score.fromSus`, `Score.fromJson`, `Score.load`, `Drawing.svg`) instead of file-path based; `Score::open*`, CLI code, local font scanning, and raster output are not part of the wasm surface.
+The `wasm` feature is independent from `python` and `image`; build it with just `--features wasm` (the default features are empty). It exposes `Score`, `Drawing`, `Rebase`, and `Lyric` through `wasm-bindgen` for in-memory `.sus` / custom-chart JSON parsing and SVG string output. Keep browser-facing APIs content-based (`Score.fromSus`, `Score.fromJson`, `Score.load`, `Drawing.svg`) instead of file-path based; `Score::open*`, CLI code, local font scanning, and raster output are not part of the wasm surface.
 
 ### `DrawingConfig.generator` / `Drawing::new` signature
 `DrawingConfig` carries a `generator: String` field (default `"HarukiBot NEO"`). `Drawing::new` accepts `generator: Option<String>` as the 6th argument — `None` keeps the default. The SVG subtitle reads from this field. Python exposes it as a `generator=None` keyword argument on `Drawing(...)` and `sus_to_svg(...)`.
@@ -134,8 +136,8 @@ Custom fonts enter through `DrawingConfig.font_paths` / `font_dirs`, CLI `--font
 
 Custom font data is cached per process in `CUSTOM_FONT_CACHE`, keyed by sorted font path, modified time, and file size. Keep that key stable when changing font loading; stale font cache bugs are harder to diagnose than a small setup cost.
 
-### Raster renderer (feature `image`, on by default)
-`tiny_skia_direct.rs` renders PNG/JPEG/raster output on tiny-skia + skrifa. It replaced the Skia (skia-safe) renderer in 0.6.0 and keeps its layout code function by function; `canvas.rs`, `text.rs`, `aaa.rs` and `raster.rs` reproduce what Skia drew on Linux. The crate-level API keeps the 0.5 names (`score_to_skia_*`, `SkiaDirectError`, `SkiaRasterOutput`, ...), and `RASTER_BACKEND` is `"tiny-skia"`. `--no-default-features` must keep building the parser/SVG-only library, and the default build must keep a dependency tree without C build steps (no `cc`, `cmake`, `bindgen` or C `-sys` crates; check with `cargo tree -e normal,build`).
+### Raster renderer (opt-in feature `image`)
+`tiny_skia_direct.rs` renders PNG/JPEG/raster output on tiny-skia + skrifa. It replaced the Skia (skia-safe) renderer in 0.6.0 and keeps its layout code function by function; `canvas.rs`, `text.rs`, `aaa.rs` and `raster.rs` reproduce what Skia drew on Linux. The crate-level API keeps the 0.5 names (`score_to_skia_*`, `SkiaDirectError`, `SkiaRasterOutput`, ...), and `RASTER_BACKEND` is `"tiny-skia"`. `image` is opt-in so library and wasm users get no tiny-skia; the shipped artifacts turn it on (`pyproject.toml` features `["python", "image"]`, `features: --features image` on the `binaries` job in `release.yml`). Keep both of those, keep the default build parser/SVG-only, keep a CLI without `image` compiling (PNG/JPEG output then fails with "rebuild with `--features image`"), and keep `--features image` free of C build steps (no `cc`, `cmake`, `bindgen` or C `-sys` crates; check with `cargo tree -e normal,build --features image`).
 
 Fidelity work is Linux-Skia-specific on purpose, and mostly emulates what Skia actually rasterizes rather than the ideal shape:
 - **Paths** (`aaa.rs` + `raster.rs`): coverage is exact area (signed-area accumulation), computed over the edges Skia's analytic AA builds: y snapped to 1/4 px, slopes from x deltas truncated to 1/64 px, cubics and quads flattened by Skia's fixed-point forward differencing, `keepContinuous` drift for non-convex paths, `SkEdgeClipper` chops for paths that leave the clip, and the walker's non-zero intervals per quarter-pixel strip. The drift alone moves long eased slides by up to 0.5 px, so do not "fix" it.
@@ -144,7 +146,7 @@ Fidelity work is Linux-Skia-specific on purpose, and mostly emulates what Skia a
 
 Fonts: only `font_paths` / `font_dirs`, plus the system fonts through fontdb with the `system-fonts` feature (`system_fonts.rs`, scanned lazily once per process); with neither, rendering returns `SkiaDirectError::NoFonts` rather than silently dropping text. JPEG is mozjpeg-rs in its libjpeg-turbo-compatible mode (one interleaved baseline scan; jpeg-encoder's optimized output was three scans that zune-jpeg misreads). PNG is the `png` crate with the Up filter and zlib-rs deflate level 2: on chart pages it is as fast as the old multithreaded mtpng encoder at a fraction of the CPU, and smaller. Note sprites and recent jackets are decoded once per process (`NOTE_ASSET_CACHE`, `JACKET_CACHE`, keyed by path, modified time and size).
 
-`tests/golden/*.png` are crops of the synthetic test chart as Linux Skia rendered it with DejaVu Sans 2.37 before 0.6.0: the only remaining Skia reference, so keep them. `PJSEKAI_SCORES_UPDATE_GOLDEN=1 cargo test golden` on Linux overwrites them with the current output; do that only for an intended rendering change and say so in the PR. Keep `tests/image_render.rs` green; set `PJSEKAI_SCORES_FIXTURE_DATA` / `PJSEKAI_SCORES_FIXTURE_FONTS` to also run the Drawing API chart fixture.
+`tests/golden/*.png` are crops of the synthetic test chart as Linux Skia rendered it with DejaVu Sans 2.37 before 0.6.0: the only remaining Skia reference, so keep them. `PJSEKAI_SCORES_UPDATE_GOLDEN=1 cargo test --features image golden` on Linux overwrites them with the current output; do that only for an intended rendering change and say so in the PR. Keep `tests/image_render.rs` green; set `PJSEKAI_SCORES_FIXTURE_DATA` / `PJSEKAI_SCORES_FIXTURE_FONTS` to also run the Drawing API chart fixture.
 
 ### Raw strings with `href="#`
 The literal `href="#` contains `"#` which prematurely closes `r#"..."#` raw strings. Use `r##"..."##` for any format string containing this pattern.
@@ -199,7 +201,7 @@ The `generate-import-lib` PyO3 feature generates a Python import `.lib` at build
 
 - Release commits and release tags must be GPG-signed. Verify with `git log -1 --show-signature` and `git tag -v vX.Y.Z`.
 - Pushing the tag runs one `Release` workflow (CLI binaries, the `pjsekai-scores-rs` wheels, the `pjsekai-scores-rs-skia-image` shim, crate). Check its PyPI job uploaded `pjsekai-scores-rs`; the shim stays at 0.6.0, so after 0.6.0 its upload is skipped as existing.
-- For rendering/font/API changes, run `cargo test`, `cargo test --features system-fonts` and `cargo check --features python` before release.
+- For rendering/font/API changes, run `cargo test --features image`, `cargo test --features image,system-fonts` and `cargo check --features python` before release.
 - For `RasterImage` changes, also build the Python wheel and verify `memoryview(raster).readonly` plus the downstream zero-copy consumer path (`.github/scripts/wheel_smoke.py` covers the first part).
 - When changing CLI/Python options, update `README.md` and `AGENTS.md` in the same docs pass.
 
@@ -262,12 +264,12 @@ The files in `.github/workflows` are thin callers:
 - `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual
   dispatch:
   - `Rust` (`rust-ci`): `cargo fmt --check`; clippy `--all-targets -D warnings` for the
-    default features (`image`), `--no-default-features`, `--features python` and
-    `--features python,system-fonts`; `cargo check --target wasm32-unknown-unknown
-    --no-default-features --features wasm`; a debug build of the CLI for
-    `x86_64-unknown-linux-musl` with `system-fonts`, checked to be statically linked and to
-    render PNG/JPEG; the tests run under `cargo llvm-cov` for the default features,
-    `--no-default-features` and `--features system-fonts`.
+    default features (parser + SVG), `--features image`, `--features python` and
+    `--features python,image,system-fonts`; `cargo check --target wasm32-unknown-unknown
+    --features wasm`; a debug build of the CLI for `x86_64-unknown-linux-musl` with
+    `image,system-fonts`, checked to be statically linked and to render PNG/JPEG; the tests
+    run under `cargo llvm-cov` for the default features, `--features image` and
+    `--features image,system-fonts`.
   - `Wheel smoke` (`maturin-wheels`): one linux-x64 `pjsekai-scores-rs` wheel, installed,
     imported and run through `.github/scripts/wheel_smoke.py` (SVG, PNG, JPEG, raster).
   - `Skia-image shim` (custom job, no template builds pure-Python packages): builds and
@@ -287,7 +289,7 @@ The files in `.github/workflows` are thin callers:
   `release-gate` refuses a tag that differs from `Cargo.toml`/`pyproject.toml` and waits
   for `CI OK` on the tagged commit. Then, in one run:
   - the CLI binaries `pjsekai-scores-rs-{linux-x64,macos-arm64}.tar.gz` and
-    `-windows-x64.zip` (`rust-release`, flat layout as before);
+    `-windows-x64.zip` (`rust-release`, flat layout as before, built with `--features image`);
   - the `pjsekai-scores-rs` wheels (features `python` + `image` from `pyproject.toml`; not
     abi3: one wheel per interpreter, linux x64/arm64 in the manylinux container plus a
     manylinux_2_28 3.14t leg, macOS arm64/x64 and Windows x64 for 3.9–3.14t; the tested

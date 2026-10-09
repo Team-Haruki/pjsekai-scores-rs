@@ -207,7 +207,7 @@ fn renders_the_drawing_fixture() {
 /// Crops of the synthetic chart as Linux Skia rendered it (FreeType, DejaVu Sans
 /// 2.37) before 0.6.0 replaced Skia, checked in under `tests/golden/`: they keep
 /// the renderer's fidelity to that output testable. `PJSEKAI_SCORES_UPDATE_GOLDEN=1
-/// cargo test golden` on Linux overwrites them with the current output; do that
+/// cargo test --features image golden` on Linux overwrites them with the current output; do that
 /// only for an intended rendering change, since it drops the Skia reference.
 const GOLDEN_CROPS: &[(&str, u32, u32, u32, u32)] = &[
     // Beat labels, speed text, notes with glow, grid lines.

@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` parser, Project SEKAI custom chart JSON parser, and SVG chart renderer, plus a pure-Rust PNG/JPEG renderer (tiny-skia + skrifa, cargo feature `image`, on by default). Distributed as a Rust crate (`pjsekai-scores-rs`), Python wheels via PyO3 0.29 / maturin, and an SVG-only WebAssembly package via wasm-bindgen. The PyPI package is `pjsekai-scores-rs` (imports as `pjsekai_scores_rs`, image output always included); `pjsekai-scores-rs-skia-image` is a deprecated metadata-only shim (`python/skia-image-shim`) that depends on it.
+Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` parser, Project SEKAI custom chart JSON parser, and SVG chart renderer, plus a pure-Rust PNG/JPEG renderer (tiny-skia + skrifa, opt-in cargo feature `image`; the wheels and release CLI binaries include it). Distributed as a Rust crate (`pjsekai-scores-rs`), Python wheels via PyO3 0.29 / maturin, and an SVG-only WebAssembly package via wasm-bindgen. The PyPI package is `pjsekai-scores-rs` (imports as `pjsekai_scores_rs`, image output always included); `pjsekai-scores-rs-skia-image` is a deprecated metadata-only shim (`python/skia-image-shim`) that depends on it.
 
 **Do not modify `../scores/`** — it is the read-only reference Python implementation.
 
@@ -30,8 +30,8 @@ Cross-references between notes are stored as `NoteIdx` into `Score::notes: Vec<N
 ### `#[cfg(feature = "python")]` guards all PyO3 code
 The crate must build as a pure Rust library without the `python` feature:
 ```bash
-cargo check --no-default-features  # parser + SVG only
-cargo check                        # + image (default)
+cargo check                        # parser + SVG only (default features)
+cargo check --features image       # + PNG/JPEG/raster
 cargo check --features python      # with PyO3
 ```
 
@@ -88,11 +88,11 @@ Public Python-facing names use snake_case matching the original `pjsekai.scores`
 ## Build & test
 
 ```bash
-cargo build --release                   # Rust crate + CLI (bin: pjsekai-scores-rs)
+cargo build --release --features image  # Rust crate + CLI with PNG/JPEG (bin: pjsekai-scores-rs)
 cargo test                              # Rust unit tests
 cargo clippy --all-targets -- -D warnings                               # Lint (must be clean)
-cargo clippy --all-targets --no-default-features -- -D warnings          # CI lints this set too
-cargo clippy --all-targets --features python,system-fonts -- -D warnings  # and this one
+cargo clippy --all-targets --features image -- -D warnings                      # CI lints this set too
+cargo clippy --all-targets --features python,image,system-fonts -- -D warnings  # and this one
 maturin build --release -i python3.14t  # Python 3.14t wheel
 pip install pjsekai-scores-rs           # Install from PyPI
 uv pip install target/wheels/*.whl      # Install local wheel into venv
@@ -150,10 +150,11 @@ The files in `.github/workflows` are thin callers:
 - `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual
   dispatch:
   - `Rust` (`rust-ci`): `cargo fmt --check`; clippy `--all-targets -D warnings` for the
-    default features (`image`), `--no-default-features`, `--features python` and
-    `--features python,system-fonts`; the wasm check; a static musl CLI build that renders
-    PNG/JPEG; the tests under `cargo llvm-cov` for the default features,
-    `--no-default-features` and `--features system-fonts`.
+    default features (parser + SVG), `--features image`, `--features python` and
+    `--features python,image,system-fonts`; the wasm check (`--features wasm`); a static musl
+    CLI build with `image,system-fonts` that renders PNG/JPEG; the tests under
+    `cargo llvm-cov` for the default features, `--features image` and
+    `--features image,system-fonts`.
   - `Wheel smoke` (`maturin-wheels`): one linux-x64 `pjsekai-scores-rs` wheel, installed,
     imported and run through `.github/scripts/wheel_smoke.py` (SVG, PNG, JPEG, raster).
   - `Skia-image shim`: builds and checks the deprecated `pjsekai-scores-rs-skia-image`
