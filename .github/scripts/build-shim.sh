@@ -6,7 +6,7 @@ set -euo pipefail
 out="$(mkdir -p "${1:?usage: build-shim.sh <out-dir>}" && cd "$1" && pwd)"
 shim=python/skia-image-shim
 
-python -m pip install --quiet --disable-pip-version-check build==1.6.1 twine==7.0.0
+python -m pip install --quiet --disable-pip-version-check --only-binary :all: build==1.6.1 twine==7.0.0
 python -m build --outdir "$out" "$shim"
 python -m twine check --strict "$out"/pjsekai_scores_rs_skia_image-*
 
