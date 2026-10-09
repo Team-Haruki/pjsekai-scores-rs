@@ -262,9 +262,9 @@ fn write_skia_image_output(
     _lyric: Option<&Lyric>,
 ) -> Result<OutputStats, Box<dyn std::error::Error>> {
     Err(
-        "PNG/JPEG output requires building with the `image` feature; this binary only writes \
-         SVG. Rebuild with `--features image`, e.g. \
-         `cargo install pjsekai-scores-rs --features image`."
+        "PNG/JPEG output requires the `image` feature; this binary was built without it and \
+         only writes SVG. Reinstall with the default features: \
+         `cargo install pjsekai-scores-rs-cli`."
             .into(),
     )
 }
@@ -594,7 +594,7 @@ mod tests {
             fs::write(&score_path, "#BPM01: 120\n#00008: 01\n").unwrap();
             let cli = args(score_path, Some(dir.path("chart.png")));
             let error = run(cli).expect_err("PNG needs the image feature");
-            assert!(error.to_string().contains("requires building"));
+            assert!(error.to_string().contains("requires the `image` feature"));
         }
     }
 }

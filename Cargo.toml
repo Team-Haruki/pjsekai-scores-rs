@@ -4,14 +4,21 @@ version = "0.6.0"
 edition = "2024"
 description = "Project SEKAI score (.sus) parser, SVG chart renderer, and pure-Rust PNG/JPEG renderer"
 license = "MIT"
+repository = "https://github.com/Team-Haruki/pjsekai-scores-rs"
+exclude = [".github/", "python/"]
+
+# The CLI lives in its own crate (cli/, `pjsekai-scores-rs-cli`) so the library has no
+# clap dependency. Both crates are versioned in lockstep: bump this file, cli/Cargo.toml
+# (its version and its `pjsekai-scores-rs` requirement) and pyproject.toml together.
+[workspace]
+members = ["cli"]
 
 [features]
 default = []
 python = ["dep:pyo3"]
 # PNG/JPEG/raster rendering, pure Rust: tiny-skia + skrifa, png (zlib-rs), zune-jpeg
 # and mozjpeg-rs. Opt-in, so library and wasm users get the parser and SVG renderer
-# only; the PyPI wheels and the release CLI binaries are built with it
-# (`cargo install pjsekai-scores-rs --features image`).
+# only; the PyPI wheels and the CLI crate (pjsekai-scores-rs-cli) turn it on.
 image = ["dep:tiny-skia", "dep:skrifa", "dep:png", "dep:zune-jpeg", "dep:mozjpeg-rs"]
 # With `image`: resolve font families that are not in font_paths/font_dirs
 # (and generic ones such as sans-serif) from the system fonts via fontdb.
@@ -22,7 +29,6 @@ wasm = ["dep:wasm-bindgen"]
 num = "0.4"
 regex = "1"
 serde_json = "1"
-clap = { version = "4", features = ["derive"] }
 pyo3 = { version = "0.29", features = ["extension-module", "generate-import-lib"], optional = true }
 tiny-skia = { version = "0.12", optional = true, default-features = false, features = ["std", "simd"] }
 skrifa = { version = "0.48", optional = true, default-features = false, features = ["std"] }
@@ -47,7 +53,3 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(Py_GIL_DISABLED)'] }
 [lib]
 name = "pjsekai_scores_rs"
 crate-type = ["lib", "cdylib"]
-
-[[bin]]
-name = "pjsekai-scores-rs"
-path = "src/main.rs"
