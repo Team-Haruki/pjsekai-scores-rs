@@ -190,7 +190,7 @@ class Rebase:
     def __call__(self, score: Score) -> Score: ...
 
 
-# Raster backend of an image-enabled build: "skia" or "tiny-skia". Absent in SVG-only builds.
+# Raster renderer: "tiny-skia". Absent in builds without the `image` feature (the PyPI wheels have it).
 RASTER_BACKEND: str
 
 

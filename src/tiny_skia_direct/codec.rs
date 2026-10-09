@@ -1,9 +1,7 @@
 //! Image decoding (PNG via `png`, JPEG via `zune-jpeg`) into premultiplied
-//! tiny-skia pixmaps, and PNG (mtpng) / JPEG (mozjpeg-rs) encoding of the
-//! rendered page.
+//! tiny-skia pixmaps, and PNG (`png` + zlib-rs) / JPEG (mozjpeg-rs) encoding of
+//! the rendered page.
 
-use mtpng::encoder::{Encoder as MtpngEncoder, Options as MtpngOptions};
-use mtpng::{ColorType as MtpngColorType, CompressionLevel, Header as MtpngHeader};
 use tiny_skia::{IntSize, Pixmap, PixmapRef, PremultipliedColorU8};
 
 use super::JpegSubsampling;
@@ -77,8 +75,8 @@ fn mul_div_255_round(c: u8, a: u8) -> u8 {
     ((prod + (prod >> 8)) >> 8) as u8
 }
 
-/// Unpremultiplied RGBA rows, as `Surface::read_pixels(.., AlphaType::Unpremul, ..)`
-/// produces them for the Skia backend.
+/// Unpremultiplied RGBA rows, as Skia's `Surface::read_pixels(.., AlphaType::Unpremul, ..)`
+/// produces them.
 pub(super) fn unpremultiplied_rgba(pixmap: PixmapRef<'_>) -> Vec<u8> {
     let mut out = Vec::with_capacity(pixmap.data().len());
     for pixel in pixmap.pixels() {
@@ -100,28 +98,21 @@ fn demultiply(pixel: PremultipliedColorU8) -> [u8; 4] {
     }
 }
 
-pub(super) fn encode_png_mtpng(pixmap: PixmapRef<'_>) -> Option<Vec<u8>> {
+/// PNG through the `png` crate: the Up filter and zlib-rs deflate level 2.
+///
+/// On chart pages this is about as fast per core as the fastest settings and
+/// smaller than zlib level 1 with adaptive filtering (what mtpng's fast mode
+/// used): rows repeat vertically, so Up beats the adaptive filter in both size
+/// and speed, and zlib-rs level 1 is a "quick" mode with a much worse ratio.
+pub(super) fn encode_png(pixmap: PixmapRef<'_>) -> Option<Vec<u8>> {
     let pixels = unpremultiplied_rgba(pixmap);
-    let mut header = MtpngHeader::new();
-    header.set_size(pixmap.width(), pixmap.height()).ok()?;
-    header.set_color(MtpngColorType::TruecolorAlpha, 8).ok()?;
-    let mut options = MtpngOptions::new();
-    options.set_compression_level(CompressionLevel::Fast).ok()?;
-    let mut encoder = MtpngEncoder::new(Vec::new(), &options);
-    encoder.write_header(&header).ok()?;
-    encoder.write_image_rows(&pixels).ok()?;
-    encoder.finish().ok()
-}
-
-/// Single-threaded `png` crate encoder; the counterpart of `PngEncoder::Skia`.
-pub(super) fn encode_png_reference(pixmap: PixmapRef<'_>) -> Option<Vec<u8>> {
-    let pixels = unpremultiplied_rgba(pixmap);
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(pixels.len() / 32);
     {
         let mut encoder = png::Encoder::new(&mut out, pixmap.width(), pixmap.height());
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
+        encoder.set_deflate_compression(png::DeflateCompression::Level(2));
+        encoder.set_filter(png::Filter::Up);
         let mut writer = encoder.write_header().ok()?;
         writer.write_image_data(&pixels).ok()?;
     }

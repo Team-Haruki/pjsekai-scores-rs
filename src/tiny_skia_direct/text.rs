@@ -1,7 +1,7 @@
 //! Font loading, glyph outlines and metrics via skrifa, shaped like the
 //! `SkTypeface` / `SkFont` subset the renderer uses.
 //!
-//! Text layout matches what the Skia backend does on Linux (FreeType, normal
+//! Text layout matches what Skia does on Linux (FreeType, normal
 //! hinting, subpixel positioning, no shaping):
 //!
 //! - one glyph per `char` through the cmap, no fallback, missing glyphs as `.notdef`;
@@ -360,7 +360,7 @@ impl Font {
         self.size = size;
     }
 
-    /// Positions are always subpixel; kept for parity with the Skia backend.
+    /// Positions are always subpixel; kept for parity with `SkFont`.
     pub(super) fn set_subpixel(&mut self, _subpixel: bool) {}
 
     pub(super) fn set_embolden(&mut self, embolden: bool) {

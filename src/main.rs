@@ -30,7 +30,7 @@ struct Args {
     #[arg(long)]
     css: Option<String>,
 
-    /// Base URL for SVG note assets, or local directory for Skia image note assets
+    /// Base URL for SVG note assets, or local directory for PNG/JPEG note assets
     #[arg(long, default_value = "https://asset3.pjsekai.moe/live/note/custom01")]
     note_host: String,
 
@@ -38,11 +38,11 @@ struct Args {
     #[arg(long, default_value = "png")]
     note_asset_extension: String,
 
-    /// Font file path to load for Skia image output; may be repeated
+    /// Font file path to load for PNG/JPEG output; may be repeated
     #[arg(long = "font-path")]
     font_paths: Vec<String>,
 
-    /// Directory containing .ttf/.otf/.ttc fonts for Skia image output; may be repeated
+    /// Directory containing .ttf/.otf/.ttc fonts for PNG/JPEG output; may be repeated
     #[arg(long = "font-dir")]
     font_dirs: Vec<String>,
 
@@ -215,12 +215,12 @@ fn write_svg_output(
         render,
         write,
         total: total_started.elapsed(),
-        #[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
+        #[cfg(feature = "image")]
         skia: None,
     })
 }
 
-#[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
+#[cfg(feature = "image")]
 fn write_skia_image_output(
     output: &str,
     output_format: OutputFormat,
@@ -238,7 +238,7 @@ fn write_skia_image_output(
             quality: jpeg_quality,
             subsampling: JpegSubsampling::parse(jpeg_subsampling).unwrap_or_default(),
         },
-        OutputFormat::Svg => unreachable!("SVG output does not use Skia"),
+        OutputFormat::Svg => unreachable!("SVG output is not rasterized"),
     };
     let image = score_to_skia_image_with_stats(drawing, score, lyric, skia_format)?;
     let write_started = Instant::now();
@@ -252,7 +252,7 @@ fn write_skia_image_output(
     })
 }
 
-#[cfg(not(any(feature = "skia-image", feature = "tiny-skia-image")))]
+#[cfg(not(feature = "image"))]
 fn write_skia_image_output(
     _output: &str,
     _output_format: OutputFormat,
@@ -261,22 +261,19 @@ fn write_skia_image_output(
     _score: &mut Score,
     _lyric: Option<&Lyric>,
 ) -> Result<OutputStats, Box<dyn std::error::Error>> {
-    Err(
-        "PNG/JPEG output requires building with `--features skia-image` (or `tiny-skia-image`)"
-            .into(),
-    )
+    Err("PNG/JPEG output requires building with the `image` feature (on by default)".into())
 }
 
 struct OutputStats {
     render: Duration,
     write: Duration,
     total: Duration,
-    #[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
+    #[cfg(feature = "image")]
     skia: Option<pjsekai_scores_rs::SkiaRenderStats>,
 }
 
 fn print_output_stats(stats: &OutputStats) {
-    #[cfg(any(feature = "skia-image", feature = "tiny-skia-image"))]
+    #[cfg(feature = "image")]
     if let Some(skia) = stats.skia {
         eprintln!(
             "Timing: render {} (layout {}, setup {}, draw {}, encode {}, copy {}), write {}, total {}",
@@ -584,14 +581,14 @@ mod tests {
     }
 
     #[test]
-    fn reports_raster_requirement_without_skia_feature() {
-        #[cfg(not(any(feature = "skia-image", feature = "tiny-skia-image")))]
+    fn reports_raster_requirement_without_image_feature() {
+        #[cfg(not(feature = "image"))]
         {
             let dir = TestDir::new();
             let score_path = dir.path("chart.sus");
             fs::write(&score_path, "#BPM01: 120\n#00008: 01\n").unwrap();
             let cli = args(score_path, Some(dir.path("chart.png")));
-            let error = run(cli).expect_err("PNG needs Skia feature");
+            let error = run(cli).expect_err("PNG needs the image feature");
             assert!(error.to_string().contains("requires building"));
         }
     }

@@ -1,9 +1,9 @@
-//! Direct PNG/JPEG renderer on tiny-skia + skrifa: a pure-Rust mirror of
-//! `skia_direct.rs` (feature `tiny-skia-image`).
+//! Direct PNG/JPEG renderer on tiny-skia + skrifa (feature `image`, on by default).
 //!
-//! The layout and drawing code follows `skia_direct.rs` function by function so the
-//! two can be diffed; only the canvas, font and codec layers differ (see the
-//! `canvas`, `text` and `codec` submodules). Pixels are premultiplied RGBA8888.
+//! It replaced the Skia (skia-safe) renderer in 0.6.0. The layout and drawing code
+//! is that renderer's, function by function; the `canvas`, `text`, `aaa` and
+//! `raster` submodules reproduce what Skia rasterized on Linux, and `codec` handles
+//! image decoding and PNG/JPEG encoding. Pixels are premultiplied RGBA8888.
 //! Fonts come from `font_paths` / `font_dirs`; with the `system-fonts` feature,
 //! families that are not registered there resolve from the system fonts.
 
@@ -135,29 +135,6 @@ impl JpegSubsampling {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PngEncoder {
-    Mtpng,
-    Skia,
-}
-
-impl PngEncoder {
-    fn configured() -> Self {
-        match std::env::var("PJSEKAI_SCORES_PNG_ENCODER").ok().as_deref() {
-            Some("skia") => Self::Skia,
-            _ => Self::Mtpng,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Mtpng => "mtpng",
-            // The single-threaded `png` crate encoder stands in for Skia's.
-            Self::Skia => "png",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkiaRasterColorType {
     Rgba8888,
     Bgra8888,
@@ -243,18 +220,6 @@ pub fn score_to_skia_png(
     score_to_skia_image(drawing, score, lyric, SkiaImageFormat::Png)
 }
 
-pub fn score_to_skia_png_with_encoder(
-    drawing: &mut Drawing,
-    score: &mut Score,
-    lyric: Option<&Lyric>,
-    encoder: PngEncoder,
-) -> Result<Vec<u8>, SkiaDirectError> {
-    Ok(
-        score_to_skia_image_with_png_encoder(drawing, score, lyric, SkiaImageFormat::Png, encoder)?
-            .bytes,
-    )
-}
-
 pub fn score_to_skia_jpeg(
     drawing: &mut Drawing,
     score: &mut Score,
@@ -297,7 +262,59 @@ pub fn score_to_skia_image_with_stats(
     lyric: Option<&Lyric>,
     format: SkiaImageFormat,
 ) -> Result<SkiaImageOutput, SkiaDirectError> {
-    score_to_skia_image_with_png_encoder(drawing, score, lyric, format, PngEncoder::configured())
+    let total_started = Instant::now();
+    let prepared = prepare_render(drawing, score)?;
+    let setup_started = Instant::now();
+    let mut surface = Pixmap::new(prepared.width as u32, prepared.height as u32)
+        .ok_or(SkiaDirectError::Surface)?;
+    let (setup_duration, draw_duration) = draw_prepared(
+        Canvas::new(surface.as_mut()),
+        drawing,
+        score,
+        lyric,
+        &prepared.layout,
+        setup_started,
+    )?;
+
+    let encode_started = Instant::now();
+    let (bytes, encoder_name) = match format {
+        SkiaImageFormat::Png => (
+            codec::encode_png(surface.as_ref()).ok_or(SkiaDirectError::Encode)?,
+            "png",
+        ),
+        SkiaImageFormat::Jpeg { quality } => (
+            codec::encode_jpeg(surface.as_ref(), quality.min(100), JpegSubsampling::Yuv420)
+                .ok_or(SkiaDirectError::Encode)?,
+            "mozjpeg-rs",
+        ),
+        SkiaImageFormat::JpegSubsampled {
+            quality,
+            subsampling,
+        } => (
+            codec::encode_jpeg(surface.as_ref(), quality.min(100), subsampling)
+                .ok_or(SkiaDirectError::Encode)?,
+            "mozjpeg-rs",
+        ),
+    };
+    let output = SkiaImageOutput {
+        bytes,
+        stats: SkiaRenderStats {
+            layout: prepared.layout_duration,
+            setup: setup_duration,
+            draw: draw_duration,
+            encode: encode_started.elapsed(),
+            copy: Duration::ZERO,
+            total: total_started.elapsed(),
+        },
+    };
+    log_profile(
+        encoder_name,
+        prepared.width,
+        prepared.height,
+        output.bytes.len(),
+        &output.stats,
+    );
+    Ok(output)
 }
 
 pub fn score_to_skia_raster(
@@ -393,73 +410,6 @@ fn draw_prepared(
     let draw_started = Instant::now();
     renderer.draw_page(&mut canvas, score, lyric, layout)?;
     Ok((setup_duration, draw_started.elapsed()))
-}
-
-fn score_to_skia_image_with_png_encoder(
-    drawing: &mut Drawing,
-    score: &mut Score,
-    lyric: Option<&Lyric>,
-    format: SkiaImageFormat,
-    png_encoder: PngEncoder,
-) -> Result<SkiaImageOutput, SkiaDirectError> {
-    let total_started = Instant::now();
-    let prepared = prepare_render(drawing, score)?;
-    let setup_started = Instant::now();
-    let mut surface = Pixmap::new(prepared.width as u32, prepared.height as u32)
-        .ok_or(SkiaDirectError::Surface)?;
-    let (setup_duration, draw_duration) = draw_prepared(
-        Canvas::new(surface.as_mut()),
-        drawing,
-        score,
-        lyric,
-        &prepared.layout,
-        setup_started,
-    )?;
-
-    let encode_started = Instant::now();
-    let (bytes, encoder_name) = match format {
-        SkiaImageFormat::Png if png_encoder == PngEncoder::Mtpng => (
-            codec::encode_png_mtpng(surface.as_ref()).ok_or(SkiaDirectError::Encode)?,
-            png_encoder.name(),
-        ),
-        SkiaImageFormat::Png => (
-            codec::encode_png_reference(surface.as_ref()).ok_or(SkiaDirectError::Encode)?,
-            "png",
-        ),
-        SkiaImageFormat::Jpeg { quality } => (
-            codec::encode_jpeg(surface.as_ref(), quality.min(100), JpegSubsampling::Yuv420)
-                .ok_or(SkiaDirectError::Encode)?,
-            "mozjpeg-rs",
-        ),
-        SkiaImageFormat::JpegSubsampled {
-            quality,
-            subsampling,
-        } => (
-            codec::encode_jpeg(surface.as_ref(), quality.min(100), subsampling)
-                .ok_or(SkiaDirectError::Encode)?,
-            "mozjpeg-rs",
-        ),
-    };
-    let (encode_duration, copy_duration) = (encode_started.elapsed(), Duration::ZERO);
-    let output = SkiaImageOutput {
-        bytes,
-        stats: SkiaRenderStats {
-            layout: prepared.layout_duration,
-            setup: setup_duration,
-            draw: draw_duration,
-            encode: encode_duration,
-            copy: copy_duration,
-            total: total_started.elapsed(),
-        },
-    };
-    log_profile(
-        encoder_name,
-        prepared.width,
-        prepared.height,
-        output.bytes.len(),
-        &output.stats,
-    );
-    Ok(output)
 }
 
 fn log_profile(encoder: &str, width: i32, height: i32, bytes: usize, stats: &SkiaRenderStats) {
@@ -3886,7 +3836,7 @@ mod tests {
     use tiny_skia::{Color, Pixmap};
 
     #[test]
-    fn mtpng_round_trips_unpremultiplied_rgba_pixels() {
+    fn png_round_trips_unpremultiplied_rgba_pixels() {
         let mut surface = Pixmap::new(3, 2).expect("pixmap");
         {
             let mut canvas = Canvas::new(surface.as_mut());
@@ -3899,7 +3849,7 @@ mod tests {
         }
         let expected = codec::unpremultiplied_rgba(surface.as_ref());
 
-        let encoded = codec::encode_png_mtpng(surface.as_ref()).expect("mtpng encode");
+        let encoded = codec::encode_png(surface.as_ref()).expect("PNG encode");
         let decoded = codec::decode_image(&encoded).expect("PNG decode");
         assert_eq!(decoded.data(), surface.data());
         assert_eq!(codec::unpremultiplied_rgba(decoded.as_ref()), expected);

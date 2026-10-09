@@ -2,26 +2,18 @@
 name = "pjsekai-scores-rs"
 version = "0.5.0"
 edition = "2024"
-description = "Project SEKAI score (.sus) parser, SVG chart renderer, and Skia image renderer"
+description = "Project SEKAI score (.sus) parser, SVG chart renderer, and pure-Rust PNG/JPEG renderer"
 license = "MIT"
 
 [features]
-default = []
+default = ["image"]
 python = ["dep:pyo3"]
-skia-image = ["dep:mtpng", "dep:skia-safe"]
-# Pure-Rust raster backend (tiny-skia + skrifa). Experimental; `skia-image` wins when both are on.
-tiny-skia-image = [
-    "dep:mtpng",
-    "dep:tiny-skia",
-    "dep:skrifa",
-    "dep:png",
-    "dep:zune-jpeg",
-    "dep:mozjpeg-rs",
-    "dep:libz-sys",
-]
-# With `tiny-skia-image`: resolve font families that are not in font_paths/font_dirs
+# PNG/JPEG/raster rendering, pure Rust: tiny-skia + skrifa, png (zlib-rs), zune-jpeg
+# and mozjpeg-rs. `--no-default-features` leaves the parser and the SVG renderer.
+image = ["dep:tiny-skia", "dep:skrifa", "dep:png", "dep:zune-jpeg", "dep:mozjpeg-rs"]
+# With `image`: resolve font families that are not in font_paths/font_dirs
 # (and generic ones such as sans-serif) from the system fonts via fontdb.
-system-fonts = ["dep:fontdb"]
+system-fonts = ["image", "dep:fontdb"]
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
@@ -30,16 +22,13 @@ regex = "1"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 pyo3 = { version = "0.29", features = ["extension-module", "generate-import-lib"], optional = true }
-mtpng = { version = "0.4.1", optional = true }
-skia-safe = { version = "0.99.0", optional = true }
 tiny-skia = { version = "0.12", optional = true, default-features = false, features = ["std", "simd"] }
 skrifa = { version = "0.48", optional = true, default-features = false, features = ["std"] }
-png = { version = "0.18", optional = true }
+# zlib-rs: pure-Rust zlib for the deflate levels (faster than miniz_oxide).
+png = { version = "0.18", optional = true, features = ["zlib-rs"] }
 zune-jpeg = { version = "0.5", optional = true }
 # libjpeg-turbo-compatible output (same scan data), NEON and AVX2, no unsafe code.
 mozjpeg-rs = { version = "0.9", optional = true, default-features = false, features = ["fast-yuv"] }
-# mtpng's zlib, built in statically so tiny-skia builds need no shared libraries.
-libz-sys = { version = "1.1", optional = true, features = ["static"] }
 fontdb = { version = "0.24", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 
