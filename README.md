@@ -35,13 +35,15 @@ The dominant win is SVG generation: Rust replaces thousands of Python `svgwrite`
 
 ## CLI Usage
 
-Install the CLI with image output (the `image` feature is opt-in):
+The CLI is its own crate, `pjsekai-scores-rs-cli`, with SVG, PNG and JPEG output; the binary is called `pjsekai-scores-rs`:
 
 ```bash
-cargo install pjsekai-scores-rs --features image
+cargo install pjsekai-scores-rs-cli
+# also resolve CSS font families from the system fonts
+cargo install pjsekai-scores-rs-cli --features system-fonts
 ```
 
-Prebuilt binaries for linux-x64, macos-arm64 and windows-x64 on the GitHub releases already include it. A plain `cargo install pjsekai-scores-rs` builds an SVG-only CLI; asking it for `.png` / `.jpg` output fails with a message to rebuild with `--features image`.
+Prebuilt binaries for linux-x64, macos-arm64 and windows-x64 are attached to the GitHub releases. Since 0.6.0 the `pjsekai-scores-rs` crate is the library only and has no binary, so `cargo install pjsekai-scores-rs` installs nothing; use `pjsekai-scores-rs-cli`. `cargo install pjsekai-scores-rs-cli --no-default-features` builds an SVG-only CLI, which stops with a message to reinstall with the default features when asked for `.png` / `.jpg`.
 
 ```
 Usage: pjsekai-scores-rs [OPTIONS] <SCORE>
@@ -174,24 +176,27 @@ let svg = drawing.svg(&mut rebased, None);
 
 ### Building (Rust only)
 
+The repository is a Cargo workspace: the library crate `pjsekai-scores-rs` at the root and the CLI crate `pjsekai-scores-rs-cli` in `cli/`.
+
 ```bash
 # CLI with SVG and PNG/JPEG output (what the GitHub releases ship)
-cargo build --release --features image --bin pjsekai-scores-rs
+cargo build --release -p pjsekai-scores-rs-cli
 
 # Also resolve CSS font families from the system fonts
-cargo build --release --features image,system-fonts --bin pjsekai-scores-rs
+cargo build --release -p pjsekai-scores-rs-cli --features system-fonts
 
-# Parser + SVG renderer only (the default features)
-cargo build --release --bin pjsekai-scores-rs
+# Library: parser + SVG renderer (the default features), or with image output
+cargo build --release
+cargo build --release --features image
 ```
 
-Everything is pure Rust: no C/C++ toolchain, no Skia download and no FreeType, fontconfig or zlib from the system, so the CLI also builds as a static musl binary. GitHub releases ship the CLI built with `--features image` (SVG, PNG and JPEG output) for linux-x64, macos-arm64 and windows-x64.
+Everything is pure Rust: no C/C++ toolchain, no Skia download and no FreeType, fontconfig or zlib from the system, so the CLI also builds as a static musl binary.
 
 ### Cargo features
 
 | Feature | Default | What it adds |
 |---|---|---|
-| `image` | no | PNG/JPEG/raster output (tiny-skia, skrifa, png with zlib-rs, zune-jpeg, mozjpeg-rs); the PyPI wheels and the release CLI binaries include it |
+| `image` | no | PNG/JPEG/raster output (tiny-skia, skrifa, png with zlib-rs, zune-jpeg, mozjpeg-rs); the PyPI wheels and the CLI crate turn it on |
 | `system-fonts` | no | With `image`: CSS font families that are not in `font_paths` / `font_dirs` resolve from the system fonts (fontdb) |
 | `python` | no | PyO3 bindings (the PyPI wheels use `python` + `image`) |
 | `wasm` | no | `wasm-bindgen` bindings; build with `--features wasm` |
@@ -525,13 +530,13 @@ PYO3_CROSS=1 PYO3_CROSS_PYTHON_VERSION=3.14 \
 
 ```
 pjsekai-scores-rs/
-├── Cargo.toml          # Rust package manifest + feature flags (image, system-fonts, python, wasm)
+├── Cargo.toml          # Workspace + library manifest, feature flags (image, system-fonts, python, wasm)
+├── cli/                # pjsekai-scores-rs-cli crate: src/main.rs, the `pjsekai-scores-rs` binary (clap)
 ├── pyproject.toml      # maturin build config (module name: pjsekai_scores_rs)
 ├── css/                # CSS themes; default.css is built in, black/white/guess/color are for --css
 ├── python/skia-image-shim/  # deprecated metadata-only pjsekai-scores-rs-skia-image package
 ├── tests/              # core flows; image_render.rs + golden/ for PNG/JPEG output
 └── src/
-    ├── main.rs         # CLI entry point (clap)
     ├── lib.rs          # Crate root + PyO3 module registration
     ├── fraction.rs     # Exact rational arithmetic (wraps num::Rational64)
     ├── meta.rs         # Score metadata (title, artist, difficulty, …)
@@ -555,7 +560,7 @@ pjsekai-scores-rs/
 
 ## Notes
 
-- The `python` feature gate enables PyO3. Without it, the crate builds as a pure Rust library + CLI binary with no Python dependency.
+- The `python` feature gate enables PyO3. Without it, the crate builds as a pure Rust library with no Python dependency. The library has no `clap` dependency and no binary; the CLI is the `pjsekai-scores-rs-cli` crate.
 - `Score::open()` and `Score::parse_auto()` auto-detect JSON-looking custom chart input; use `Score::open_sus()` / `Score::parse()` or `Score::open_json()` / `Score::parse_json()` to force a format.
 - The `wasm` feature enables `wasm-bindgen` exports for in-memory parsing and SVG rendering. It is independent from `python` and `image`; do not use local file-path APIs in browser builds.
 - The opt-in `image` feature enables direct PNG/JPEG output and `Drawing.raster()` on a pure-Rust renderer: tiny-skia for pixels, skrifa for fonts. It emulates what Skia rasterized on Linux (analytic anti-aliasing, FreeType-style glyph masks), so output stays close to the Skia renderer it replaced in 0.6.0. It needs no C/C++ toolchain and no system libraries, and builds as a static musl binary. Its raster is always `rgba8888` premultiplied, and the Python module reports the renderer in `pjsekai_scores_rs.RASTER_BACKEND` (`"tiny-skia"`). Set `PJSEKAI_SCORES_TINY_SKIA_HINTING=0` to draw unhinted glyph outlines.

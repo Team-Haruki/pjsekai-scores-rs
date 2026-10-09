@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` parser, Project SEKAI custom chart JSON parser, and SVG chart renderer, plus a pure-Rust PNG/JPEG renderer (tiny-skia + skrifa, opt-in cargo feature `image`; the wheels and release CLI binaries include it). Distributed as a Rust crate (`pjsekai-scores-rs`), Python wheels via PyO3 0.29 / maturin, and an SVG-only WebAssembly package via wasm-bindgen. The PyPI package is `pjsekai-scores-rs` (imports as `pjsekai_scores_rs`, image output always included); `pjsekai-scores-rs-skia-image` is a deprecated metadata-only shim (`python/skia-image-shim`) that depends on it.
+Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` parser, Project SEKAI custom chart JSON parser, and SVG chart renderer, plus a pure-Rust PNG/JPEG renderer (tiny-skia + skrifa, opt-in cargo feature `image`; the wheels and release CLI binaries include it). Distributed as a Rust library crate (`pjsekai-scores-rs`, no clap and no binary), a CLI crate (`pjsekai-scores-rs-cli` in `cli/`, binary `pjsekai-scores-rs`), Python wheels via PyO3 0.29 / maturin, and an SVG-only WebAssembly package via wasm-bindgen. The PyPI package is `pjsekai-scores-rs` (imports as `pjsekai_scores_rs`, image output always included); `pjsekai-scores-rs-skia-image` is a deprecated metadata-only shim (`python/skia-image-shim`) that depends on it.
 
 **Do not modify `../scores/`** — it is the read-only reference Python implementation.
 
@@ -88,7 +88,8 @@ Public Python-facing names use snake_case matching the original `pjsekai.scores`
 ## Build & test
 
 ```bash
-cargo build --release --features image  # Rust crate + CLI with PNG/JPEG (bin: pjsekai-scores-rs)
+cargo build --release -p pjsekai-scores-rs-cli  # CLI crate (cli/), image on (bin: pjsekai-scores-rs)
+cargo build --release --features image  # library + PNG/JPEG/raster
 cargo test                              # Rust unit tests
 cargo clippy --all-targets -- -D warnings                               # Lint (must be clean)
 cargo clippy --all-targets --features image -- -D warnings                      # CI lints this set too
@@ -149,12 +150,13 @@ The files in `.github/workflows` are thin callers:
 
 - `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual
   dispatch:
-  - `Rust` (`rust-ci`): `cargo fmt --check`; clippy `--all-targets -D warnings` for the
-    default features (parser + SVG), `--features image`, `--features python` and
-    `--features python,image,system-fonts`; the wasm check (`--features wasm`); a static musl
-    CLI build with `image,system-fonts` that renders PNG/JPEG; the tests under
-    `cargo llvm-cov` for the default features, `--features image` and
-    `--features image,system-fonts`.
+  - `Rust` (`rust-ci`, library selected with `-p pjsekai-scores-rs`): `cargo fmt --check`;
+    clippy for the library's default features (parser + SVG), `--features image`,
+    `--features python` and `--features python,image,system-fonts`, and for the CLI crate
+    with its defaults, `--no-default-features` and `--features system-fonts`; the wasm check
+    (`--features wasm`); a static musl build of the CLI crate that renders PNG/JPEG; the tests
+    under `cargo llvm-cov` for the library (default, `image`, `image,system-fonts`) and the
+    CLI crate (with and without its default features).
   - `Wheel smoke` (`maturin-wheels`): one linux-x64 `pjsekai-scores-rs` wheel, installed,
     imported and run through `.github/scripts/wheel_smoke.py` (SVG, PNG, JPEG, raster).
   - `Skia-image shim`: builds and checks the deprecated `pjsekai-scores-rs-skia-image`
@@ -166,10 +168,10 @@ The files in `.github/workflows` are thin callers:
   on merge; check `CI OK` yourself before merging.
 - `release.yml` (`Release`) replaces the old `release.yml` + `release-crate.yml` +
   `release-python.yml` (which rewrote the version from the tag with `sed`). Bump
-  `version` in **both** `Cargo.toml` and `pyproject.toml` (and the package's own entry in
-  `Cargo.lock`) in a PR → merge and wait for `CI OK` on `main` → push the signed tag
+  `version` in `Cargo.toml`, `cli/Cargo.toml` (version and `=x.y.z` library requirement),
+  `pyproject.toml` and both crates' entries in `Cargo.lock` in a PR → merge and wait for `CI OK` on `main` → push the signed tag
   `v<version>`. Pushing the tag creates the GitHub Release; do not create it by hand.
-  `release-gate` refuses a tag that differs from `Cargo.toml`/`pyproject.toml` and waits
+  `release-gate` refuses a tag that differs from `Cargo.toml`/`cli/Cargo.toml`/`pyproject.toml` and waits
   for `CI OK` on the tagged commit. Then, in one run:
   - the CLI binaries `pjsekai-scores-rs-{linux-x64,macos-arm64}.tar.gz` and
     `-windows-x64.zip` (`rust-release`, flat layout as before);
@@ -178,7 +180,7 @@ The files in `.github/workflows` are thin callers:
     leg, macOS arm64/x64 and Windows x64 for 3.9–3.14t) and the sdist;
   - the `pjsekai-scores-rs-skia-image` 0.6.0 shim (sdist + py3-none-any wheel);
   - the GitHub Release with the binaries and `SHA256SUMS-<tag>.txt`;
-  - PyPI (trusted publishing, environment `pypi`) for both projects, and crates.io
+  - PyPI (trusted publishing, environment `pypi`) for both projects, and crates.io (`pjsekai-scores-rs`, then `pjsekai-scores-rs-cli`)
     (environment `crates-io`, `CARGO_REGISTRY_TOKEN`).
   Manual dispatch is a dry run: it builds everything and publishes nothing.
 - CI never rewrites `Cargo.toml` / `pyproject.toml` or regenerates `Cargo.lock`.
