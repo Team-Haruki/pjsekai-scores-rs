@@ -263,8 +263,8 @@ fn write_skia_image_output(
 ) -> Result<OutputStats, Box<dyn std::error::Error>> {
     Err(
         "PNG/JPEG output requires the `image` feature; this binary was built without it and \
-         only writes SVG. Reinstall with the default features: \
-         `cargo install pjsekai-scores-rs-cli`."
+         only writes SVG. Rebuild with `--features cli,image`, e.g. \
+         `cargo install pjsekai-scores-rs --features cli,image`."
             .into(),
     )
 }

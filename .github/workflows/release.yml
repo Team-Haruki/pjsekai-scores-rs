@@ -26,10 +26,7 @@ jobs:
     uses: seiunx-dev/ci-templates/.github/workflows/release-gate.yml@v1
     with:
       version-source: cargo
-      # Library, CLI crate and Python package are versioned in lockstep.
-      version-extra-paths: |
-        pyproject.toml
-        cli/Cargo.toml
+      version-extra-paths: pyproject.toml
 
   binaries:
     name: Binaries
@@ -40,9 +37,8 @@ jobs:
       tag: ${{ needs.gate.outputs.tag }}
       asset-name: "{name}-{label}"
       layout: flat
-      # The binary comes from the CLI crate, whose default features include `image`.
-      cargo-args: -p pjsekai-scores-rs-cli
-      bins: pjsekai-scores-rs
+      # `cli` (the binary) and `image` are opt-in; the released CLI renders PNG/JPEG.
+      features: --features cli,image
 
   wheels:
     name: Wheels
@@ -141,10 +137,5 @@ jobs:
           cache: "false"
       - uses: seiunx-dev/ci-templates/actions/cargo-publish@v1
         with:
-          # Library first: the CLI crate depends on it (`=` the same version). The token (the
-          # repository secret CARGO_REGISTRY_TOKEN) must cover both crates; publishing a crate
-          # name for the first time (pjsekai-scores-rs-cli in 0.6.0) needs its publish-new scope.
-          packages: |
-            pjsekai-scores-rs
-            pjsekai-scores-rs-cli
+          packages: pjsekai-scores-rs
           token: ${{ secrets.CARGO_REGISTRY_TOKEN }}

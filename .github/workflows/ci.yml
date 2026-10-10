@@ -23,41 +23,33 @@ jobs:
     uses: seiunx-dev/ci-templates/.github/workflows/rust-ci.yml@v1
     with:
       coverage: true
-      # Two crates: the library (root) and the CLI (cli/). The feature sets below are the
-      # library's alone: `--workspace` would unify features and turn `image` on through the
-      # CLI. The CLI is linted in extra-lint-command and tested in extra-test-command.
-      cargo-args: -p pjsekai-scores-rs
       # musl-tools is for the static CLI check in extra-lint-command; DejaVu Sans is the
       # font of the golden crops and of that check.
       apt-packages: musl-tools fonts-dejavu-core
-      # The default features are empty (parser + SVG); `image` is opt-in. python + image
-      # is the wheel build.
+      # The default features are empty (parser + SVG library); `image` and `cli` (the
+      # binary, clap) are opt-in. python + image is the wheel build, cli + image the
+      # release binaries.
       feature-sets: |
         default
         --features image
+        --features cli
         --features python
-        --features python,image,system-fonts
-      # default is the parser/SVG-only build, image runs the golden crops and the no-font error path, image,system-fonts the
-      # fontdb fallback.
+        --features cli,python,image,system-fonts
+      # default is the parser/SVG-only library, cli the SVG-only CLI (its "rebuild with
+      # image" error), cli,image the release CLI plus the golden crops and the no-font error
+      # path, cli,image,system-fonts the fontdb fallback.
       test-feature-sets: |
         default
-        --features image
-        --features image,system-fonts
-      # The CLI with its default features (image) and without (SVG only, "reinstall with
-      # image" error); under coverage like the library tests.
-      extra-test-command: |
-        $CARGO_TEST --locked -p pjsekai-scores-rs-cli
-        $CARGO_TEST --locked -p pjsekai-scores-rs-cli --no-default-features
+        --features cli
+        --features cli,image
+        --features cli,image,system-fonts
       targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
       # The image renderer must keep building as a fully static musl CLI (no C or C++,
       # no system libraries); the template has no musl job, so build and run it here.
       extra-lint-command: |
         set -euo pipefail
-        for flags in "" --no-default-features "--features system-fonts"; do
-          cargo clippy --locked -p pjsekai-scores-rs-cli --all-targets $flags -- -D warnings
-        done
         cargo check --locked --target wasm32-unknown-unknown --features wasm
-        cargo build --locked --target x86_64-unknown-linux-musl -p pjsekai-scores-rs-cli --features system-fonts
+        cargo build --locked --target x86_64-unknown-linux-musl --features cli,image,system-fonts
         bin=target/x86_64-unknown-linux-musl/debug/pjsekai-scores-rs
         file "$bin" | grep -E 'static(-pie)? linked'
         printf '#BPM01: 120\n#00008: 01\n#00012: 14\n#00013: 13\n' > "$RUNNER_TEMP/smoke.sus"
