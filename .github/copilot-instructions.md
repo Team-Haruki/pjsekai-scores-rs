@@ -2,7 +2,7 @@
 
 ## Project overview
 
-Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` parser, Project SEKAI custom chart JSON parser, and SVG chart renderer. Distributed as a Rust crate (`pjsekai-scores-rs`), Python wheels via PyO3 0.29 / maturin, and an SVG-only WebAssembly package via wasm-bindgen. The default PyPI package is `pjsekai-scores-rs`; the optional Skia image-output package is `pjsekai-scores-rs-skia-image`. Both import as `pjsekai_scores_rs`.
+Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` parser, Project SEKAI custom chart JSON parser, and SVG chart renderer, plus a pure-Rust PNG/JPEG renderer (tiny-skia + skrifa, opt-in cargo feature `image`; the wheels and release CLI binaries include it). The CLI binary needs the opt-in `cli` feature (clap). Distributed as a Rust crate (`pjsekai-scores-rs`), Python wheels via PyO3 0.29 / maturin, and an SVG-only WebAssembly package via wasm-bindgen. The PyPI package is `pjsekai-scores-rs` (imports as `pjsekai_scores_rs`, image output always included); `pjsekai-scores-rs-skia-image` is a deprecated metadata-only shim (`python/skia-image-shim`) that depends on it.
 
 **Do not modify `../scores/`** — it is the read-only reference Python implementation.
 
@@ -25,13 +25,14 @@ Rust rewrite of the [pjsekai/scores](https://gitlab.com/pjsekai/scores) `.sus` p
 type NoteIdx = usize;
 const NO_NOTE: NoteIdx = usize::MAX;
 ```
-Cross-references between notes are stored as `NoteIdx` into `Score::notes: Vec<NoteData>`. Never introduce `Rc` or `RefCell` — they break PyO3 free-threaded compatibility. `Arc` is `Send + Sync` and is already used for the shared custom-font cache in `skia_direct.rs`.
+Cross-references between notes are stored as `NoteIdx` into `Score::notes: Vec<NoteData>`. Never introduce `Rc` or `RefCell` — they break PyO3 free-threaded compatibility. `Arc` is `Send + Sync` and is already used for the shared custom-font cache in `tiny_skia_direct.rs`.
 
 ### `#[cfg(feature = "python")]` guards all PyO3 code
 The crate must build as a pure Rust library without the `python` feature:
 ```bash
-cargo check              # pure Rust
-cargo check --features python  # with PyO3
+cargo check                        # parser + SVG only (default features)
+cargo check --features image       # + PNG/JPEG/raster
+cargo check --features python      # with PyO3
 ```
 
 ### `pub init_notes()` and `pub init_events()` on Score
@@ -72,7 +73,7 @@ format!(r#"<use href="#{id}"/>"#, id = id)    // ❌ syntax error
 
 ## Python API conventions
 
-Public Python-facing names use snake_case matching the original `pjsekai.scores` API where possible. The Python packages on PyPI are `pjsekai-scores-rs` and `pjsekai-scores-rs-skia-image`; both import as `import pjsekai_scores_rs`. Key differences from the Python original that must be preserved:
+Public Python-facing names use snake_case matching the original `pjsekai.scores` API where possible. The Python package on PyPI is `pjsekai-scores-rs`; it imports as `import pjsekai_scores_rs`. Key differences from the Python original that must be preserved:
 
 - `Score.set_meta(**kwargs)` (not attribute assignment)
 - `Rebase.from_dict(d).apply(score)` (not `load_from_dict` / `rebase`)
@@ -87,10 +88,11 @@ Public Python-facing names use snake_case matching the original `pjsekai.scores`
 ## Build & test
 
 ```bash
-cargo build --release                   # Rust crate + CLI (bin: pjsekai-scores-rs)
+cargo build --release --features cli,image  # CLI with PNG/JPEG (bin: pjsekai-scores-rs, needs `cli`)
 cargo test                              # Rust unit tests
 cargo clippy --all-targets -- -D warnings                               # Lint (must be clean)
-cargo clippy --all-targets --features python,skia-image -- -D warnings  # CI lints this set too
+cargo clippy --all-targets --features image -- -D warnings                      # CI lints this set too
+cargo clippy --all-targets --features cli,python,image,system-fonts -- -D warnings  # and this one
 maturin build --release -i python3.14t  # Python 3.14t wheel
 pip install pjsekai-scores-rs           # Install from PyPI
 uv pip install target/wheels/*.whl      # Install local wheel into venv
@@ -148,12 +150,15 @@ The files in `.github/workflows` are thin callers:
 - `ci.yml` (`CI`) runs on `main` pushes, pull requests targeting `main`, and manual
   dispatch:
   - `Rust` (`rust-ci`): `cargo fmt --check`; clippy `--all-targets -D warnings` for the
-    default features and for `--features python,skia-image` (fontconfig/freetype from
-    apt); `cargo check --target wasm32-unknown-unknown --no-default-features --features
-    wasm`; the tests run once under `cargo llvm-cov`.
-  - `Wheel smoke` (`maturin-wheels`): one linux-x64 wheel per package
-    (`pjsekai-scores-rs` and `pjsekai-scores-rs-skia-image`), installed and imported, so
-    the PyO3 bindings and the Skia build are compiled on every PR.
+    default features (parser + SVG library), `--features image`, `--features cli`,
+    `--features python` and `--features cli,python,image,system-fonts`; the wasm check
+    (`--features wasm`); a static musl CLI build with `cli,image,system-fonts` that renders
+    PNG/JPEG; the tests under `cargo llvm-cov` for the default features, `--features cli`,
+    `--features cli,image` and `--features cli,image,system-fonts`.
+  - `Wheel smoke` (`maturin-wheels`): one linux-x64 `pjsekai-scores-rs` wheel, installed,
+    imported and run through `.github/scripts/wheel_smoke.py` (SVG, PNG, JPEG, raster).
+  - `Skia-image shim`: builds and checks the deprecated `pjsekai-scores-rs-skia-image`
+    shim with `.github/scripts/build-shim.sh`.
   - `Sonar` scans the coverage (skipped green on Dependabot/fork PRs); `Workflow lint`
     runs actionlint.
 - The aggregate job **`CI OK`** summarises the run and is what `release-gate` waits for.
@@ -168,12 +173,12 @@ The files in `.github/workflows` are thin callers:
   for `CI OK` on the tagged commit. Then, in one run:
   - the CLI binaries `pjsekai-scores-rs-{linux-x64,macos-arm64}.tar.gz` and
     `-windows-x64.zip` (`rust-release`, flat layout as before);
-  - the wheels of both packages (`.github/scripts/configure-python-package.sh` sets the
-    package name and maturin features per variant; not abi3: one wheel per interpreter,
-    linux x64/arm64 in the manylinux container plus a manylinux_2_28 3.14t leg, macOS
-    arm64/x64 and Windows x64 for 3.9–3.14t) and their sdists;
+  - the `pjsekai-scores-rs` wheels (features `python` + `image`; not abi3: one wheel per
+    interpreter, linux x64/arm64 in the manylinux container plus a manylinux_2_28 3.14t
+    leg, macOS arm64/x64 and Windows x64 for 3.9–3.14t) and the sdist;
+  - the `pjsekai-scores-rs-skia-image` 0.6.0 shim (sdist + py3-none-any wheel);
   - the GitHub Release with the binaries and `SHA256SUMS-<tag>.txt`;
-  - PyPI (trusted publishing, environment `pypi`) for both packages, and crates.io
+  - PyPI (trusted publishing, environment `pypi`) for both projects, and crates.io
     (environment `crates-io`, `CARGO_REGISTRY_TOKEN`).
   Manual dispatch is a dry run: it builds everything and publishes nothing.
 - CI never rewrites `Cargo.toml` / `pyproject.toml` or regenerates `Cargo.lock`.

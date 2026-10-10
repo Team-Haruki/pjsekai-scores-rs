@@ -1,3 +1,20 @@
+//! Direct PNG/JPEG renderer on tiny-skia + skrifa (opt-in feature `image`).
+//!
+//! It replaced the Skia (skia-safe) renderer in 0.6.0. The layout and drawing code
+//! is that renderer's, function by function; the `canvas`, `text`, `aaa` and
+//! `raster` submodules reproduce what Skia rasterized on Linux, and `codec` handles
+//! image decoding and PNG/JPEG encoding. Pixels are premultiplied RGBA8888.
+//! Fonts come from `font_paths` / `font_dirs`; with the `system-fonts` feature,
+//! families that are not registered there resolve from the system fonts.
+
+mod aaa;
+mod canvas;
+mod codec;
+mod raster;
+#[cfg(feature = "system-fonts")]
+mod system_fonts;
+mod text;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -5,13 +22,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mtpng::encoder::{Encoder as MtpngEncoder, Options as MtpngOptions};
-use mtpng::{ColorType as MtpngColorType, CompressionLevel, Header as MtpngHeader};
-use skia_safe::{
-    AlphaType, Color, Color4f, ColorType, Data, EncodedImageFormat, FilterMode, Font, FontMgr,
-    FontStyle, Image, ImageInfo, Paint, PaintStyle, PathBuilder, Point, Rect, SamplingOptions,
-    Surface, TileMode, Typeface, Unichar, gradient, surfaces,
-};
+use tiny_skia::{Color, PathBuilder, Pixmap, PixmapMut};
+
+use self::canvas::{Canvas, Image, Paint, PaintStyle, Rect};
+use self::text::{Font, FontStyle, Typeface, Unichar};
 
 use crate::drawing::{CoverObject, Drawing, DrawingConfig};
 use crate::fraction::Fraction;
@@ -31,6 +45,15 @@ const CUSTOM_FONT_CACHE_MAX_ENTRIES: usize = 8;
 static CUSTOM_FONT_CACHE: LazyLock<Mutex<HashMap<Vec<FontFileKey>, SharedCustomTypefaces>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
+/// Decoded note sprites per sprite set; at most this many sets are kept.
+const NOTE_ASSET_CACHE_MAX_ENTRIES: usize = 4;
+static NOTE_ASSET_CACHE: LazyLock<Mutex<HashMap<NoteAssetsKey, Arc<NoteAssets>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static WORKER_THREADS: OnceLock<usize> = OnceLock::new();
+/// Recently drawn jackets, decoded (most recent last); at most this many.
+const JACKET_CACHE_MAX_ENTRIES: usize = 8;
+static JACKET_CACHE: LazyLock<Mutex<Vec<(FontFileKey, Image)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
 
 const FALLBACK_FONT_FAMILIES: &[&str] = &[
     "Hiragino Sans",
@@ -66,32 +89,47 @@ pub enum SkiaDirectError {
     },
     Decode(PathBuf),
     Encode,
+    /// No font to draw text with: nothing in `font_paths` / `font_dirs` and no
+    /// system font fallback.
+    NoFonts,
 }
+
+/// Name of this raster backend.
+pub const BACKEND_NAME: &str = "tiny-skia";
 
 #[derive(Debug, Clone, Copy)]
 pub enum SkiaImageFormat {
     Png,
-    Jpeg { quality: u8 },
+    /// Baseline JPEG with 4:2:0 chroma subsampling.
+    Jpeg {
+        quality: u8,
+    },
+    /// Baseline JPEG with the given chroma subsampling.
+    JpegSubsampled {
+        quality: u8,
+        subsampling: JpegSubsampling,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PngEncoder {
-    Mtpng,
-    Skia,
+/// Chroma subsampling of JPEG output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum JpegSubsampling {
+    /// Chroma at half resolution in both directions: libjpeg's and Skia's
+    /// default, the smallest files.
+    #[default]
+    Yuv420,
+    /// Chroma at full resolution: sharper coloured edges (thin lines, small
+    /// coloured text), larger files.
+    Yuv444,
 }
 
-impl PngEncoder {
-    fn configured() -> Self {
-        match std::env::var("PJSEKAI_SCORES_PNG_ENCODER").ok().as_deref() {
-            Some("skia") => Self::Skia,
-            _ => Self::Mtpng,
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            Self::Mtpng => "mtpng",
-            Self::Skia => "skia",
+impl JpegSubsampling {
+    /// Parses `"420"`/`"4:2:0"` or `"444"`/`"4:4:4"`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "420" | "4:2:0" => Some(Self::Yuv420),
+            "444" | "4:4:4" => Some(Self::Yuv444),
+            _ => None,
         }
     }
 }
@@ -141,8 +179,10 @@ impl fmt::Display for SkiaDirectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SkiaDirectError::InvalidSize => f.write_str("chart has an invalid raster size"),
-            SkiaDirectError::Surface => f.write_str("failed to create Skia raster surface"),
-            SkiaDirectError::RenderWorker => f.write_str("Skia segment render worker panicked"),
+            SkiaDirectError::Surface => f.write_str("failed to create tiny-skia raster pixmap"),
+            SkiaDirectError::RenderWorker => {
+                f.write_str("tiny-skia segment render worker panicked")
+            }
             SkiaDirectError::Io { path, source } => {
                 write!(f, "failed to read image asset {}: {source}", path.display())
             }
@@ -153,6 +193,10 @@ impl fmt::Display for SkiaDirectError {
                 write!(f, "failed to decode image asset {}", path.display())
             }
             SkiaDirectError::Encode => f.write_str("failed to encode raster output"),
+            SkiaDirectError::NoFonts => f.write_str(
+                "no fonts to draw text with: the tiny-skia backend only uses fonts passed in \
+                 font_paths / font_dirs unless it is built with the `system-fonts` feature",
+            ),
         }
     }
 }
@@ -176,18 +220,6 @@ pub fn score_to_skia_png(
     score_to_skia_image(drawing, score, lyric, SkiaImageFormat::Png)
 }
 
-pub fn score_to_skia_png_with_encoder(
-    drawing: &mut Drawing,
-    score: &mut Score,
-    lyric: Option<&Lyric>,
-    encoder: PngEncoder,
-) -> Result<Vec<u8>, SkiaDirectError> {
-    Ok(
-        score_to_skia_image_with_png_encoder(drawing, score, lyric, SkiaImageFormat::Png, encoder)?
-            .bytes,
-    )
-}
-
 pub fn score_to_skia_jpeg(
     drawing: &mut Drawing,
     score: &mut Score,
@@ -195,6 +227,24 @@ pub fn score_to_skia_jpeg(
     quality: u8,
 ) -> Result<Vec<u8>, SkiaDirectError> {
     score_to_skia_image(drawing, score, lyric, SkiaImageFormat::Jpeg { quality })
+}
+
+pub fn score_to_skia_jpeg_with_subsampling(
+    drawing: &mut Drawing,
+    score: &mut Score,
+    lyric: Option<&Lyric>,
+    quality: u8,
+    subsampling: JpegSubsampling,
+) -> Result<Vec<u8>, SkiaDirectError> {
+    score_to_skia_image(
+        drawing,
+        score,
+        lyric,
+        SkiaImageFormat::JpegSubsampled {
+            quality,
+            subsampling,
+        },
+    )
 }
 
 pub fn score_to_skia_image(
@@ -212,7 +262,59 @@ pub fn score_to_skia_image_with_stats(
     lyric: Option<&Lyric>,
     format: SkiaImageFormat,
 ) -> Result<SkiaImageOutput, SkiaDirectError> {
-    score_to_skia_image_with_png_encoder(drawing, score, lyric, format, PngEncoder::configured())
+    let total_started = Instant::now();
+    let prepared = prepare_render(drawing, score)?;
+    let setup_started = Instant::now();
+    let mut surface = Pixmap::new(prepared.width as u32, prepared.height as u32)
+        .ok_or(SkiaDirectError::Surface)?;
+    let (setup_duration, draw_duration) = draw_prepared(
+        Canvas::new(surface.as_mut()),
+        drawing,
+        score,
+        lyric,
+        &prepared.layout,
+        setup_started,
+    )?;
+
+    let encode_started = Instant::now();
+    let (bytes, encoder_name) = match format {
+        SkiaImageFormat::Png => (
+            codec::encode_png(surface.as_ref()).ok_or(SkiaDirectError::Encode)?,
+            "png",
+        ),
+        SkiaImageFormat::Jpeg { quality } => (
+            codec::encode_jpeg(surface.as_ref(), quality.min(100), JpegSubsampling::Yuv420)
+                .ok_or(SkiaDirectError::Encode)?,
+            "mozjpeg-rs",
+        ),
+        SkiaImageFormat::JpegSubsampled {
+            quality,
+            subsampling,
+        } => (
+            codec::encode_jpeg(surface.as_ref(), quality.min(100), subsampling)
+                .ok_or(SkiaDirectError::Encode)?,
+            "mozjpeg-rs",
+        ),
+    };
+    let output = SkiaImageOutput {
+        bytes,
+        stats: SkiaRenderStats {
+            layout: prepared.layout_duration,
+            setup: setup_duration,
+            draw: draw_duration,
+            encode: encode_started.elapsed(),
+            copy: Duration::ZERO,
+            total: total_started.elapsed(),
+        },
+    };
+    log_profile(
+        encoder_name,
+        prepared.width,
+        prepared.height,
+        output.bytes.len(),
+        &output.stats,
+    );
+    Ok(output)
 }
 
 pub fn score_to_skia_raster(
@@ -222,26 +324,21 @@ pub fn score_to_skia_raster(
 ) -> Result<SkiaRasterOutput, SkiaDirectError> {
     let total_started = Instant::now();
     let prepared = prepare_render(drawing, score)?;
-    let image_info = ImageInfo::new_n32_premul((prepared.width, prepared.height), None);
-    let color_type = match image_info.color_type() {
-        ColorType::RGBA8888 => SkiaRasterColorType::Rgba8888,
-        ColorType::BGRA8888 => SkiaRasterColorType::Bgra8888,
-        _ => return Err(SkiaDirectError::Surface),
-    };
-    let row_bytes = image_info.min_row_bytes();
-    let mut pixels = vec![0_u8; image_info.compute_byte_size(row_bytes)];
+    // tiny-skia pixmaps are always premultiplied RGBA8888, tightly packed.
+    let color_type = SkiaRasterColorType::Rgba8888;
+    let row_bytes = prepared.width as usize * 4;
+    let mut pixels = vec![0_u8; row_bytes * prepared.height as usize];
     let setup_started = Instant::now();
-    let mut surface = surfaces::wrap_pixels(&image_info, &mut pixels, row_bytes, None)
+    let surface = PixmapMut::from_bytes(&mut pixels, prepared.width as u32, prepared.height as u32)
         .ok_or(SkiaDirectError::Surface)?;
     let (setup_duration, draw_duration) = draw_prepared(
-        &mut surface,
+        Canvas::new(surface),
         drawing,
         score,
         lyric,
         &prepared.layout,
         setup_started,
     )?;
-    drop(surface);
 
     let output = SkiaRasterOutput {
         width: prepared.width,
@@ -300,7 +397,7 @@ fn prepare_render(
 }
 
 fn draw_prepared(
-    surface: &mut Surface,
+    mut canvas: Canvas<'_>,
     drawing: &Drawing,
     score: &mut Score,
     lyric: Option<&Lyric>,
@@ -311,91 +408,8 @@ fn draw_prepared(
     let renderer = DirectRenderer::new(drawing, styles)?;
     let setup_duration = setup_started.elapsed();
     let draw_started = Instant::now();
-    renderer.draw_page(surface.canvas(), score, lyric, layout)?;
+    renderer.draw_page(&mut canvas, score, lyric, layout)?;
     Ok((setup_duration, draw_started.elapsed()))
-}
-
-fn score_to_skia_image_with_png_encoder(
-    drawing: &mut Drawing,
-    score: &mut Score,
-    lyric: Option<&Lyric>,
-    format: SkiaImageFormat,
-    png_encoder: PngEncoder,
-) -> Result<SkiaImageOutput, SkiaDirectError> {
-    let total_started = Instant::now();
-    let prepared = prepare_render(drawing, score)?;
-    let setup_started = Instant::now();
-    let mut surface = surfaces::raster_n32_premul((prepared.width, prepared.height))
-        .ok_or(SkiaDirectError::Surface)?;
-    let (setup_duration, draw_duration) = draw_prepared(
-        &mut surface,
-        drawing,
-        score,
-        lyric,
-        &prepared.layout,
-        setup_started,
-    )?;
-
-    let (bytes, encode_duration, copy_duration, encoder_name) = match format {
-        SkiaImageFormat::Png if png_encoder == PngEncoder::Mtpng => {
-            let encode_started = Instant::now();
-            let bytes = encode_surface_mtpng(&mut surface)?;
-            (
-                bytes,
-                encode_started.elapsed(),
-                Duration::ZERO,
-                png_encoder.name(),
-            )
-        }
-        SkiaImageFormat::Png => {
-            let image = surface.image_snapshot();
-            let encode_started = Instant::now();
-            #[allow(deprecated)]
-            let data = image
-                .encode_to_data_with_quality(EncodedImageFormat::PNG, 100)
-                .ok_or(SkiaDirectError::Encode)?;
-            let encode_duration = encode_started.elapsed();
-            let copy_started = Instant::now();
-            let bytes = data.as_bytes().to_vec();
-            (
-                bytes,
-                encode_duration,
-                copy_started.elapsed(),
-                png_encoder.name(),
-            )
-        }
-        SkiaImageFormat::Jpeg { quality } => {
-            let image = surface.image_snapshot();
-            let encode_started = Instant::now();
-            #[allow(deprecated)]
-            let data = image
-                .encode_to_data_with_quality(EncodedImageFormat::JPEG, quality.min(100) as u32)
-                .ok_or(SkiaDirectError::Encode)?;
-            let encode_duration = encode_started.elapsed();
-            let copy_started = Instant::now();
-            let bytes = data.as_bytes().to_vec();
-            (bytes, encode_duration, copy_started.elapsed(), "skia-jpeg")
-        }
-    };
-    let output = SkiaImageOutput {
-        bytes,
-        stats: SkiaRenderStats {
-            layout: prepared.layout_duration,
-            setup: setup_duration,
-            draw: draw_duration,
-            encode: encode_duration,
-            copy: copy_duration,
-            total: total_started.elapsed(),
-        },
-    };
-    log_profile(
-        encoder_name,
-        prepared.width,
-        prepared.height,
-        output.bytes.len(),
-        &output.stats,
-    );
-    Ok(output)
 }
 
 fn log_profile(encoder: &str, width: i32, height: i32, bytes: usize, stats: &SkiaRenderStats) {
@@ -422,42 +436,6 @@ fn profile_enabled() -> bool {
             .ok()
             .is_some_and(|value| !matches!(value.as_str(), "" | "0" | "false" | "False"))
     })
-}
-
-fn encode_surface_mtpng(surface: &mut Surface) -> Result<Vec<u8>, SkiaDirectError> {
-    let width = surface.width();
-    let height = surface.height();
-    let row_bytes = width as usize * 4;
-    let mut pixels = vec![0_u8; row_bytes * height as usize];
-    let info = ImageInfo::new(
-        (width, height),
-        ColorType::RGBA8888,
-        AlphaType::Unpremul,
-        None,
-    );
-    if !surface.read_pixels(&info, &mut pixels, row_bytes, (0, 0)) {
-        return Err(SkiaDirectError::Encode);
-    }
-
-    let mut header = MtpngHeader::new();
-    header
-        .set_size(width as u32, height as u32)
-        .map_err(|_| SkiaDirectError::Encode)?;
-    header
-        .set_color(MtpngColorType::TruecolorAlpha, 8)
-        .map_err(|_| SkiaDirectError::Encode)?;
-    let mut options = MtpngOptions::new();
-    options
-        .set_compression_level(CompressionLevel::Fast)
-        .map_err(|_| SkiaDirectError::Encode)?;
-    let mut encoder = MtpngEncoder::new(Vec::new(), &options);
-    encoder
-        .write_header(&header)
-        .map_err(|_| SkiaDirectError::Encode)?;
-    encoder
-        .write_image_rows(&pixels)
-        .map_err(|_| SkiaDirectError::Encode)?;
-    encoder.finish().map_err(|_| SkiaDirectError::Encode)
 }
 
 struct Layout {
@@ -550,20 +528,21 @@ impl Layout {
 struct DirectRenderer<'a> {
     drawing: &'a Drawing,
     styles: CssStyles,
-    font_mgr: FontMgr,
     custom_typefaces: SharedCustomTypefaces,
-    note_assets: NoteAssets,
+    note_assets: Arc<NoteAssets>,
     font_cache: Mutex<HashMap<FontKey, Font>>,
 }
 
 impl<'a> DirectRenderer<'a> {
     fn new(drawing: &'a Drawing, styles: CssStyles) -> Result<Self, SkiaDirectError> {
         let note_assets = NoteAssets::load(&drawing.config);
-        let (font_mgr, custom_typefaces) = build_font_manager(&drawing.config)?;
+        let custom_typefaces = build_font_manager(&drawing.config)?;
+        if custom_typefaces.is_empty() && !system_fonts_available() {
+            return Err(SkiaDirectError::NoFonts);
+        }
         Ok(Self {
             drawing,
             styles,
-            font_mgr,
             custom_typefaces,
             note_assets,
             font_cache: Mutex::new(HashMap::new()),
@@ -572,7 +551,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_page(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         lyric: Option<&Lyric>,
         layout: &Layout,
@@ -697,16 +676,12 @@ impl<'a> DirectRenderer<'a> {
             for segment in &layout.segments {
                 let y_offset = layout.max_height - segment.height + cfg.time_padding as f64;
                 canvas.save();
-                canvas.clip_rect(
-                    Rect::from_xywh(
-                        as_f32(x_offset + cfg.lane_padding as f64),
-                        as_f32(y_offset),
-                        as_f32(segment.width),
-                        as_f32(segment.height),
-                    ),
-                    None,
-                    Some(true),
-                );
+                canvas.clip_rect(Rect::from_xywh(
+                    as_f32(x_offset + cfg.lane_padding as f64),
+                    as_f32(y_offset),
+                    as_f32(segment.width),
+                    as_f32(segment.height),
+                ));
                 canvas.translate((as_f32(x_offset + cfg.lane_padding as f64), as_f32(y_offset)));
                 self.draw_segment(
                     canvas,
@@ -720,7 +695,6 @@ impl<'a> DirectRenderer<'a> {
                 x_offset += segment.width;
             }
         }
-
         debug_assert!((x_offset - layout.total_width).abs() < 0.001);
         Ok(())
     }
@@ -739,10 +713,7 @@ impl<'a> DirectRenderer<'a> {
 
         std::thread::scope(|scope| {
             let drawing = self.drawing;
-            let worker_count = std::thread::available_parallelism()
-                .map(|threads| threads.get())
-                .unwrap_or(1)
-                .min(layout.segments.len());
+            let worker_count = worker_threads().min(layout.segments.len());
             let chunk_size = layout.segments.len().div_ceil(worker_count);
             let handles: Vec<_> = layout
                 .segments
@@ -751,13 +722,12 @@ impl<'a> DirectRenderer<'a> {
                 .map(|(chunk_idx, segments)| {
                     let start_idx = chunk_idx * chunk_size;
                     let styles = self.styles.clone();
-                    let note_assets = self.note_assets.clone();
+                    let note_assets = Arc::clone(&self.note_assets);
                     let custom_typefaces = self.custom_typefaces.clone();
                     scope.spawn(move || {
                         let renderer = DirectRenderer {
                             drawing,
                             styles,
-                            font_mgr: FontMgr::default(),
                             custom_typefaces,
                             note_assets,
                             font_cache: Mutex::new(HashMap::new()),
@@ -809,9 +779,9 @@ impl<'a> DirectRenderer<'a> {
 
         let mut segment_score = segment_score(score);
         let mut surface =
-            surfaces::raster_n32_premul((width, height)).ok_or(SkiaDirectError::Surface)?;
+            Pixmap::new(width as u32, height as u32).ok_or(SkiaDirectError::Surface)?;
         self.draw_segment(
-            surface.canvas(),
+            &mut Canvas::new(surface.as_mut()),
             &mut segment_score,
             lyric,
             segment,
@@ -822,13 +792,13 @@ impl<'a> DirectRenderer<'a> {
         Ok(SegmentRaster {
             width,
             height,
-            image: surface.image_snapshot(),
+            image: Arc::new(surface),
         })
     }
 
     fn draw_segment(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         lyric: Option<&Lyric>,
         segment: &Segment,
@@ -880,7 +850,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_segment_covers(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         bar_start: Fraction,
         bar_stop: Fraction,
@@ -908,7 +878,7 @@ impl<'a> DirectRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn draw_segment_text_cover(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         bar_from: Fraction,
         css_class: &str,
@@ -941,7 +911,7 @@ impl<'a> DirectRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn draw_segment_rect_cover(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         bar_from: Fraction,
         bar_to: Fraction,
@@ -971,7 +941,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_segment_grid(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         segment: &Segment,
         bar_stop: Fraction,
@@ -984,7 +954,7 @@ impl<'a> DirectRenderer<'a> {
         }
     }
 
-    fn draw_segment_lane_lines(&self, canvas: &skia_safe::Canvas, height: f64) {
+    fn draw_segment_lane_lines(&self, canvas: &mut Canvas<'_>, height: f64) {
         let cfg = &self.drawing.config;
         for lane in (0..=cfg.n_lanes).step_by(2) {
             let x = cfg.lane_width as f64 * lane as f64 + cfg.lane_padding as f64;
@@ -1003,7 +973,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_segment_bar_line(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         bar: Fraction,
         bar_stop: Fraction,
@@ -1026,7 +996,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_segment_beat_lines(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         bar: Fraction,
         bar_stop: Fraction,
@@ -1058,7 +1028,7 @@ impl<'a> DirectRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn draw_segment_notes(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         arena: &[NoteData],
         render_index: &RenderIndex,
@@ -1091,7 +1061,7 @@ impl<'a> DirectRenderer<'a> {
         }
     }
 
-    fn draw_speed_lines(&self, canvas: &skia_safe::Canvas, speed_lines: Vec<SpeedLine>) {
+    fn draw_speed_lines(&self, canvas: &mut Canvas<'_>, speed_lines: Vec<SpeedLine>) {
         let cfg = &self.drawing.config;
         let x1 = cfg.lane_padding as f64;
         let x2 = cfg.lane_width as f64 * cfg.n_lanes as f64 + x1;
@@ -1120,7 +1090,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_event_labels(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         bar_start: i32,
         bar_stop: i32,
@@ -1151,7 +1121,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_skia_event_flag(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         event: &Event,
         bar_stop: Fraction,
@@ -1181,7 +1151,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_skia_event_text(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         event: &Event,
         bar_stop: Fraction,
@@ -1221,7 +1191,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_lyrics(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         lyric: &Lyric,
         bar_start_f: Fraction,
@@ -1316,7 +1286,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_slide_path(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         arena: &[NoteData],
         start_idx: NoteIdx,
@@ -1338,24 +1308,34 @@ impl<'a> DirectRenderer<'a> {
         let mut path = PathBuilder::new();
         for (i, left) in lefts.iter().enumerate() {
             if i == 0 {
-                path.move_to(point(left[0]));
+                let (x, y) = point(left[0]);
+                path.move_to(x, y);
             }
-            path.cubic_to(point(left[1]), point(left[2]), point(left[3]));
+            let ((x1, y1), (x2, y2), (x, y)) = (point(left[1]), point(left[2]), point(left[3]));
+            path.cubic_to(x1, y1, x2, y2, x, y);
         }
         for (i, right) in rights.iter().rev().enumerate() {
             if i == 0 {
-                path.line_to(point(right[3]));
+                let (x, y) = point(right[3]);
+                path.line_to(x, y);
             }
-            path.cubic_to(point(right[2]), point(right[1]), point(right[0]));
+            let ((x1, y1), (x2, y2), (x, y)) = (point(right[2]), point(right[1]), point(right[0]));
+            path.cubic_to(x1, y1, x2, y2, x, y);
         }
         path.close();
-        let path = path.detach();
+        let Some(path) = path.finish() else {
+            return;
+        };
         let paint = if let Some(gradient_id) = gradient_id {
             let stops = self
                 .styles
                 .gradient_stops(gradient_id, decoration_gradient_fallback(is_critical));
-            gradient_fill_paint(*path.bounds(), stops)
-                .unwrap_or_else(|| fill_paint(self.color(class_name, fallback)))
+            let bounds = path.bounds();
+            gradient_fill_paint(
+                Rect::from_xywh(bounds.x(), bounds.y(), bounds.width(), bounds.height()),
+                stops,
+            )
+            .unwrap_or_else(|| fill_paint(self.color(class_name, fallback)))
         } else {
             fill_paint(self.color(class_name, fallback))
         };
@@ -1444,7 +1424,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_note(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         arena: &[NoteData],
         note_idx: NoteIdx,
@@ -1484,7 +1464,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_friction_among(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         arena: &[NoteData],
         note_idx: NoteIdx,
@@ -1510,7 +1490,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_flick(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         arena: &[NoteData],
         note_idx: NoteIdx,
@@ -1596,7 +1576,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_tick(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         arena: &[NoteData],
         tick: TickCommand,
@@ -1643,7 +1623,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_tick_with_interval(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &mut Score,
         y: f64,
         interval: Fraction,
@@ -1685,7 +1665,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_among(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         kind: AmongKind,
         x: f64,
         y: f64,
@@ -1701,7 +1681,7 @@ impl<'a> DirectRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn draw_note_image_asset(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         note_number: i32,
         width_units: i32,
         x: f64,
@@ -1725,7 +1705,7 @@ impl<'a> DirectRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn draw_flick_image_asset(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         is_critical: bool,
         is_diagonal: bool,
         flip_right: bool,
@@ -1760,7 +1740,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_among_image_asset(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         kind: AmongKind,
         x: f64,
         y: f64,
@@ -1783,7 +1763,7 @@ impl<'a> DirectRenderer<'a> {
 
     fn draw_jacket(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         score: &Score,
         x: f64,
         y: f64,
@@ -1797,21 +1777,14 @@ impl<'a> DirectRenderer<'a> {
             return Ok(());
         };
 
-        let bytes = fs::read(path.as_path()).map_err(|source| SkiaDirectError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let image = Image::from_encoded(Data::new_copy(&bytes))
-            .ok_or_else(|| SkiaDirectError::Decode(path.clone()))?;
-        let paint = fill_paint(RGBA::WHITE);
-        let sampling = SamplingOptions::from(FilterMode::Linear);
-        canvas.draw_image_rect_with_sampling_options(&image, None, rect, sampling, &paint);
+        let image = load_jacket(&path)?;
+        canvas.draw_image_rect(&image, None, rect);
         Ok(())
     }
 
     fn draw_jacket_placeholder(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         x: f64,
         y: f64,
         width: f64,
@@ -1844,7 +1817,7 @@ impl<'a> DirectRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn draw_rect(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         x: f64,
         y: f64,
         width: f64,
@@ -1859,7 +1832,7 @@ impl<'a> DirectRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn draw_line(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         x1: f64,
         y1: f64,
         x2: f64,
@@ -1878,7 +1851,7 @@ impl<'a> DirectRenderer<'a> {
     #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         text: &str,
         x: f64,
         y: f64,
@@ -1893,20 +1866,24 @@ impl<'a> DirectRenderer<'a> {
         let color = style.fill.unwrap_or(defaults.color);
         let size = style.font_size.unwrap_or(defaults.size);
         let weight = style.font_weight.unwrap_or(defaults.weight);
-        let paint = fill_paint(color);
         let font = self.font(size, weight, style.font_families.as_deref(), text);
         let mut draw_x = x;
         if matches!(anchor, TextAnchor::End) {
-            let (width, _) = font.measure_str(text, Some(&paint));
+            let width = font.measure_str(text);
             draw_x -= width as f64;
         }
-        canvas.draw_str(text, (as_f32(draw_x), as_f32(y)), &font, &paint);
+        let glyphs = font.glyphs(text, (as_f32(draw_x), as_f32(y)), canvas.transform());
+        canvas.draw_glyphs(
+            &glyphs,
+            color.to_color(),
+            text::glyph_coverage_lut(color.to_color()),
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
     fn draw_rotated_text(
         &self,
-        canvas: &skia_safe::Canvas,
+        canvas: &mut Canvas<'_>,
         text: &str,
         x: f64,
         y: f64,
@@ -1918,7 +1895,7 @@ impl<'a> DirectRenderer<'a> {
     ) {
         canvas.save();
         canvas.translate((as_f32(pivot_x), as_f32(pivot_y)));
-        canvas.rotate(-90.0, None);
+        canvas.rotate(-90.0);
         self.draw_text(
             canvas,
             text,
@@ -1956,13 +1933,9 @@ impl<'a> DirectRenderer<'a> {
             .chain(FALLBACK_FONT_FAMILIES.iter().copied())
             .filter_map(|family| self.match_font_family(family, style, &required_cjk_glyphs))
             .next()
-            .or_else(|| {
-                if required_cjk_glyphs.is_empty() {
-                    self.font_mgr.legacy_make_typeface(None, style)
-                } else {
-                    self.match_any_custom_font(style, &required_cjk_glyphs)
-                }
-            });
+            // The default typeface: the closest custom font, else a system one.
+            .or_else(|| self.match_any_custom_font(style, &required_cjk_glyphs))
+            .or_else(|| system_default_typeface(style, &required_cjk_glyphs));
         let mut font = if let Some(typeface) = typeface {
             Font::new(typeface, Some(size))
         } else {
@@ -1989,23 +1962,10 @@ impl<'a> DirectRenderer<'a> {
             return None;
         }
 
-        if let Some(typeface) = self.match_custom_font_family(family, style, required_cjk_glyphs) {
-            return Some(typeface);
-        }
-
-        let typeface = if family.eq_ignore_ascii_case("serif")
-            || family.eq_ignore_ascii_case("sans-serif")
-            || family.eq_ignore_ascii_case("monospace")
-        {
-            self.font_mgr.legacy_make_typeface(Some(family), style)
-        } else {
-            self.font_mgr.match_family_style(family, style)
-        }?;
-
-        if !typeface_supports_glyphs(&typeface, required_cjk_glyphs) {
-            return None;
-        }
-        Some(typeface)
+        // Registered font files first, then (feature `system-fonts`) the system
+        // fonts, which also resolve generic families such as `sans-serif`.
+        self.match_custom_font_family(family, style, required_cjk_glyphs)
+            .or_else(|| system_match_family(family, style, required_cjk_glyphs))
     }
 
     fn match_custom_font_family(
@@ -2152,21 +2112,72 @@ struct NoteAssets {
     sliced_notes: HashMap<NoteBodyKey, Image>,
 }
 
+/// Identifies a decoded sprite set: every sprite file (path, modified time,
+/// size) and the lane width the note bodies are pre-sliced for.
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct NoteAssetsKey {
+    lane_width: i32,
+    files: Vec<(String, FontFileKey)>,
+}
+
 impl NoteAssets {
-    fn load(cfg: &DrawingConfig) -> Self {
-        let mut images = HashMap::new();
-        for name in note_asset_names() {
-            let Some(path) = note_asset_path(cfg, &name) else {
-                continue;
-            };
-            let Ok(bytes) = fs::read(&path) else {
-                continue;
-            };
-            let Some(image) = Image::from_encoded(Data::new_copy(&bytes)) else {
-                continue;
-            };
-            images.insert(name, image);
+    /// The decoded sprites for `cfg`, shared between renders (and threads) while
+    /// the files are unchanged, like the custom font cache.
+    fn load(cfg: &DrawingConfig) -> Arc<Self> {
+        let paths = note_asset_names()
+            .into_iter()
+            .filter_map(|name| note_asset_path(cfg, &name).map(|path| (name, path)))
+            .collect::<Vec<_>>();
+        let key = NoteAssetsKey {
+            lane_width: cfg.lane_width,
+            files: paths
+                .iter()
+                .filter_map(|(name, path)| Some((name.clone(), file_key(path)?)))
+                .collect(),
+        };
+        if let Some(assets) = NOTE_ASSET_CACHE
+            .lock()
+            .expect("note asset cache lock poisoned")
+            .get(&key)
+        {
+            return Arc::clone(assets);
         }
+        let assets = Arc::new(Self::decode(cfg, &paths));
+        let mut cache = NOTE_ASSET_CACHE
+            .lock()
+            .expect("note asset cache lock poisoned");
+        if cache.len() >= NOTE_ASSET_CACHE_MAX_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&assets));
+        assets
+    }
+
+    fn decode(cfg: &DrawingConfig, paths: &[(String, PathBuf)]) -> Self {
+        // Decoding the ~40 sprites with the pure-Rust `png` crate runs in parallel.
+        let workers = worker_threads().clamp(1, 8);
+        let chunk_size = paths.len().div_ceil(workers).max(1);
+        let images: HashMap<String, Image> = std::thread::scope(|scope| {
+            let handles: Vec<_> = paths
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .filter_map(|(name, path)| {
+                                let bytes = fs::read(path).ok()?;
+                                let image = codec::decode_image(&bytes)?;
+                                Some((name.clone(), Arc::new(image)))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap_or_default())
+                .collect()
+        });
 
         let mut sliced_notes = HashMap::new();
         let note_height = cfg.lane_width as f64 / 64.0 * 56.0 * 2.0;
@@ -2207,13 +2218,10 @@ impl NoteAssets {
     }
 }
 
-fn build_font_manager(
-    config: &DrawingConfig,
-) -> Result<(FontMgr, SharedCustomTypefaces), SkiaDirectError> {
-    let system_mgr = FontMgr::default();
+fn build_font_manager(config: &DrawingConfig) -> Result<SharedCustomTypefaces, SkiaDirectError> {
     let font_paths = collect_font_paths(config);
     if font_paths.is_empty() {
-        return Ok((system_mgr, Arc::new(HashMap::new())));
+        return Ok(Arc::new(HashMap::new()));
     }
     let cache_key = font_cache_key(&font_paths)?;
 
@@ -2223,7 +2231,7 @@ fn build_font_manager(
         .get(&cache_key)
         .cloned()
     {
-        return Ok((system_mgr, custom_typefaces));
+        return Ok(custom_typefaces);
     }
 
     let mut custom_typefaces = HashMap::<String, Vec<Typeface>>::new();
@@ -2232,7 +2240,7 @@ fn build_font_manager(
             path: path.clone(),
             source,
         })?;
-        for typeface in load_typefaces_from_data(&system_mgr, &bytes) {
+        for typeface in text::load_typefaces_from_data(bytes) {
             register_custom_typeface(&mut custom_typefaces, typeface);
         }
     }
@@ -2246,21 +2254,7 @@ fn build_font_manager(
     }
     cache.insert(cache_key, Arc::clone(&custom_typefaces));
 
-    Ok((system_mgr, custom_typefaces))
-}
-
-fn load_typefaces_from_data(font_mgr: &FontMgr, bytes: &[u8]) -> Vec<Typeface> {
-    let mut faces = Vec::new();
-    for ttc_index in 0..32 {
-        let Some(typeface) = font_mgr.new_from_data(bytes, Some(ttc_index)) else {
-            if ttc_index == 0 {
-                return faces;
-            }
-            break;
-        };
-        faces.push(typeface);
-    }
-    faces
+    Ok(custom_typefaces)
 }
 
 fn collect_font_paths(config: &DrawingConfig) -> Vec<PathBuf> {
@@ -2317,6 +2311,46 @@ fn font_cache_key(font_paths: &[PathBuf]) -> Result<Vec<FontFileKey>, SkiaDirect
         .collect()
 }
 
+/// The decoded jacket at `path`, from a small per-process cache keyed like the
+/// font cache (path, modified time, size): charts of the same song are
+/// usually rendered more than once (difficulties, re-requests).
+fn load_jacket(path: &Path) -> Result<Image, SkiaDirectError> {
+    let key = file_key(path);
+    if let Some(key) = &key {
+        let mut cache = JACKET_CACHE.lock().expect("jacket cache lock poisoned");
+        if let Some(index) = cache.iter().position(|(cached, _)| cached == key) {
+            let entry = cache.remove(index);
+            let image = entry.1.clone();
+            cache.push(entry);
+            return Ok(image);
+        }
+    }
+    let bytes = fs::read(path).map_err(|source| SkiaDirectError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let image = Arc::new(
+        codec::decode_image(&bytes).ok_or_else(|| SkiaDirectError::Decode(path.to_path_buf()))?,
+    );
+    if let Some(key) = key {
+        let mut cache = JACKET_CACHE.lock().expect("jacket cache lock poisoned");
+        if cache.len() >= JACKET_CACHE_MAX_ENTRIES {
+            cache.remove(0);
+        }
+        cache.push((key, image.clone()));
+    }
+    Ok(image)
+}
+
+fn file_key(path: &Path) -> Option<FontFileKey> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(FontFileKey {
+        path: path.to_path_buf(),
+        modified_nanos: metadata.modified().ok().and_then(system_time_nanos),
+        len: metadata.len(),
+    })
+}
+
 fn system_time_nanos(time: SystemTime) -> Option<u128> {
     time.duration_since(UNIX_EPOCH)
         .ok()
@@ -2337,10 +2371,7 @@ fn register_custom_typeface(
     custom_typefaces: &mut HashMap<String, Vec<Typeface>>,
     typeface: Typeface,
 ) {
-    let mut names = typeface
-        .new_family_name_iterator()
-        .map(|localized| localized.string)
-        .collect::<Vec<_>>();
+    let mut names = typeface.family_names().to_vec();
     names.push(typeface.family_name());
     if let Some(post_script_name) = typeface.post_script_name() {
         names.push(post_script_name);
@@ -2407,10 +2438,51 @@ fn note_asset_path(cfg: &DrawingConfig, name: &str) -> Option<PathBuf> {
 }
 
 fn should_render_segments_parallel(layout: &Layout) -> bool {
-    layout.segments.len() > 1
-        && std::thread::available_parallelism()
-            .map(|threads| threads.get() > 1)
-            .unwrap_or(false)
+    layout.segments.len() > 1 && worker_threads() > 1
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_fonts_available() -> bool {
+    system_fonts::available()
+}
+
+#[cfg(not(feature = "system-fonts"))]
+fn system_fonts_available() -> bool {
+    false
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_match_family(
+    family: &str,
+    style: FontStyle,
+    required_glyphs: &[Unichar],
+) -> Option<Typeface> {
+    system_fonts::match_family(family, style, required_glyphs)
+}
+
+#[cfg(not(feature = "system-fonts"))]
+fn system_match_family(_: &str, _: FontStyle, _: &[Unichar]) -> Option<Typeface> {
+    None
+}
+
+#[cfg(feature = "system-fonts")]
+fn system_default_typeface(style: FontStyle, required_glyphs: &[Unichar]) -> Option<Typeface> {
+    system_fonts::default_typeface(style, required_glyphs)
+}
+
+#[cfg(not(feature = "system-fonts"))]
+fn system_default_typeface(_: FontStyle, _: &[Unichar]) -> Option<Typeface> {
+    None
+}
+
+/// `available_parallelism`, read once: on Linux it parses cgroup files, which is
+/// not free on a per-draw path.
+fn worker_threads() -> usize {
+    *WORKER_THREADS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(|threads| threads.get())
+            .unwrap_or(1)
+    })
 }
 
 fn segment_score(source: &Score) -> Score {
@@ -2426,7 +2498,7 @@ fn segment_score(source: &Score) -> Score {
 }
 
 fn draw_segment_image(
-    canvas: &skia_safe::Canvas,
+    canvas: &mut Canvas<'_>,
     raster: &SegmentRaster,
     x: f64,
     y: f64,
@@ -2434,11 +2506,12 @@ fn draw_segment_image(
     height: f64,
 ) -> Result<(), SkiaDirectError> {
     canvas.save();
-    canvas.clip_rect(
-        Rect::from_xywh(as_f32(x), as_f32(y), as_f32(width), as_f32(height)),
-        None,
-        Some(true),
-    );
+    canvas.clip_rect(Rect::from_xywh(
+        as_f32(x),
+        as_f32(y),
+        as_f32(width),
+        as_f32(height),
+    ));
     draw_image(
         canvas,
         &raster.image,
@@ -2849,7 +2922,7 @@ fn binary_solution_for_x_inner(
 }
 
 fn draw_vector_note_body(
-    canvas: &skia_safe::Canvas,
+    canvas: &mut Canvas<'_>,
     note_number: i32,
     x: f64,
     y: f64,
@@ -2941,7 +3014,7 @@ fn draw_vector_note_body(
 
 #[allow(clippy::too_many_arguments)]
 fn draw_vector_flick(
-    canvas: &skia_safe::Canvas,
+    canvas: &mut Canvas<'_>,
     is_critical: bool,
     is_diagonal: bool,
     flip_right: bool,
@@ -3006,7 +3079,7 @@ fn draw_vector_flick(
     canvas.save();
     if let Some(angle) = rotation {
         canvas.translate((as_f32(width * 0.5), as_f32(height * 0.48)));
-        canvas.rotate(angle, None);
+        canvas.rotate(angle);
         canvas.translate((as_f32(-width * 0.5), as_f32(-height * 0.48)));
     }
     draw_polygon_stroke(
@@ -3022,7 +3095,7 @@ fn draw_vector_flick(
 }
 
 fn draw_vector_among(
-    canvas: &skia_safe::Canvas,
+    canvas: &mut Canvas<'_>,
     kind: AmongKind,
     x: f64,
     y: f64,
@@ -3084,7 +3157,7 @@ fn draw_vector_among(
 }
 
 fn draw_round_rect(
-    canvas: &skia_safe::Canvas,
+    canvas: &mut Canvas<'_>,
     x: f64,
     y: f64,
     width: f64,
@@ -3100,47 +3173,49 @@ fn draw_round_rect(
     );
 }
 
-fn draw_polygon(canvas: &skia_safe::Canvas, points: &[(f64, f64)], paint: Paint) {
+fn draw_polygon(canvas: &mut Canvas<'_>, points: &[(f64, f64)], paint: Paint) {
     if points.is_empty() {
         return;
     }
     let mut path = PathBuilder::new();
-    path.move_to((as_f32(points[0].0), as_f32(points[0].1)));
+    path.move_to(as_f32(points[0].0), as_f32(points[0].1));
     for point in &points[1..] {
-        path.line_to((as_f32(point.0), as_f32(point.1)));
+        path.line_to(as_f32(point.0), as_f32(point.1));
     }
     path.close();
-    let path = path.detach();
-    canvas.draw_path(&path, &paint);
+    if let Some(path) = path.finish() {
+        canvas.draw_path(&path, &paint);
+    }
 }
 
-fn draw_polygon_stroke(canvas: &skia_safe::Canvas, points: &[(f64, f64)], color: RGBA, width: f64) {
+fn draw_polygon_stroke(canvas: &mut Canvas<'_>, points: &[(f64, f64)], color: RGBA, width: f64) {
     draw_polygon(canvas, points, stroke_paint(color, as_f32(width)));
 }
 
-fn draw_polyline(canvas: &skia_safe::Canvas, points: &[(f64, f64)], color: RGBA, width: f64) {
+fn draw_polyline(canvas: &mut Canvas<'_>, points: &[(f64, f64)], color: RGBA, width: f64) {
     if points.is_empty() {
         return;
     }
     let mut path = PathBuilder::new();
-    path.move_to((as_f32(points[0].0), as_f32(points[0].1)));
+    path.move_to(as_f32(points[0].0), as_f32(points[0].1));
     for point in &points[1..] {
-        path.line_to((as_f32(point.0), as_f32(point.1)));
+        path.line_to(as_f32(point.0), as_f32(point.1));
     }
-    let path = path.detach();
-    canvas.draw_path(&path, &stroke_paint(color, as_f32(width)));
+    if let Some(path) = path.finish() {
+        canvas.draw_path(&path, &stroke_paint(color, as_f32(width)));
+    }
 }
 
 fn draw_sliced_note_image(
-    canvas: &skia_safe::Canvas,
+    canvas: &mut Canvas<'_>,
     image: &Image,
     x: f64,
     y: f64,
     width: f64,
     height: f64,
 ) {
-    let src_w = image.width() as f64;
-    let src_h = image.height() as f64;
+    let src_w = f64::from(image.width());
+    let src_h = f64::from(image.height());
     if src_w <= 0.0 || src_h <= 0.0 {
         return;
     }
@@ -3181,36 +3256,21 @@ fn render_sliced_note_image(image: &Image, width: f64, height: f64) -> Option<Im
         return None;
     }
 
-    let mut surface = surfaces::raster_n32_premul((width_px, height_px))?;
-    let canvas = surface.canvas();
+    let mut surface = Pixmap::new(width_px as u32, height_px as u32)?;
+    let mut canvas = Canvas::new(surface.as_mut());
     canvas.clear(Color::TRANSPARENT);
-    draw_sliced_note_image(canvas, image, 0.0, 0.0, width, height);
-    Some(surface.image_snapshot())
+    draw_sliced_note_image(&mut canvas, image, 0.0, 0.0, width, height);
+    Some(Arc::new(surface))
 }
 
-fn draw_image(canvas: &skia_safe::Canvas, image: &Image, x: f64, y: f64, width: f64, height: f64) {
-    let dst = rect(x, y, width, height);
-    let paint = image_paint();
-    let sampling = SamplingOptions::from(FilterMode::Linear);
-    canvas.draw_image_rect_with_sampling_options(image, None, dst, sampling, &paint);
+/// Bilinear, anti-aliased image draw (Skia: `FilterMode::Linear`, AA paint).
+fn draw_image(canvas: &mut Canvas<'_>, image: &Image, x: f64, y: f64, width: f64, height: f64) {
+    canvas.draw_image_rect(image, None, rect(x, y, width, height));
 }
 
-fn draw_image_src_dst(canvas: &skia_safe::Canvas, image: &Image, src: Rect, dst: Rect) {
-    let paint = image_paint();
-    let sampling = SamplingOptions::from(FilterMode::Linear);
-    canvas.draw_image_rect_with_sampling_options(
-        image,
-        Some((&src, skia_safe::canvas::SrcRectConstraint::Fast)),
-        dst,
-        sampling,
-        &paint,
-    );
-}
-
-fn image_paint() -> Paint {
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint
+/// Like `draw_image` with a source rect and Skia's `SrcRectConstraint::Fast`.
+fn draw_image_src_dst(canvas: &mut Canvas<'_>, image: &Image, src: Rect, dst: Rect) {
+    canvas.draw_image_rect(image, Some(src), dst);
 }
 
 fn fill_paint(color: RGBA) -> Paint {
@@ -3225,26 +3285,14 @@ fn gradient_fill_paint(bounds: Rect, stops: GradientStops) -> Option<Paint> {
     if bounds.is_empty() {
         return None;
     }
-    let colors = [
-        Color4f::from(stops.start.to_color()),
-        Color4f::from(stops.stop.to_color()),
-    ];
-    let gradient = gradient::Gradient::new(
-        gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None),
-        gradient::Interpolation::default(),
-    );
-    let shader = gradient::shaders::linear_gradient(
-        (
-            Point::new(bounds.left(), bounds.bottom()),
-            Point::new(bounds.left(), bounds.top()),
-        ),
-        &gradient,
-        None,
-    )?;
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     paint.set_style(PaintStyle::Fill);
-    paint.set_shader(shader);
+    paint.set_linear_gradient(
+        (bounds.left(), bounds.bottom()),
+        (bounds.left(), bounds.top()),
+        [stops.start.to_color(), stops.stop.to_color()],
+    );
     Some(paint)
 }
 
@@ -3257,8 +3305,8 @@ fn stroke_paint(color: RGBA, width: f32) -> Paint {
     paint
 }
 
-fn point(point: (f64, f64)) -> Point {
-    Point::new(as_f32(point.0), as_f32(point.1))
+fn point(point: (f64, f64)) -> (f32, f32) {
+    (as_f32(point.0), as_f32(point.1))
 }
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> Rect {
@@ -3341,7 +3389,7 @@ impl RGBA {
     }
 
     fn to_color(self) -> Color {
-        Color::from_argb(self.a, self.r, self.g, self.b)
+        Color::from_rgba8(self.r, self.g, self.b, self.a)
     }
 }
 
@@ -3618,8 +3666,8 @@ fn normalize_family_lookup(name: &str) -> String {
 }
 
 fn font_style_distance(candidate: FontStyle, requested: FontStyle) -> i32 {
-    ((*candidate.weight() - *requested.weight()).abs() * 100)
-        + ((*candidate.width() - *requested.width()).abs() * 10)
+    ((candidate.weight() - requested.weight()).abs() * 100)
+        + ((candidate.width() - requested.width()).abs() * 10)
         + i32::from(candidate.slant() != requested.slant())
 }
 
@@ -3777,40 +3825,98 @@ fn format_g(v: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::JpegSubsampling;
+    use super::SkiaDirectError;
     use super::{
-        SkiaRasterColorType, encode_surface_mtpng, parse_css_body, parse_font_families,
-        score_to_skia_raster,
+        SkiaRasterColorType, canvas::Canvas, canvas::Paint, canvas::Rect, codec, parse_css_body,
+        parse_font_families, score_to_skia_raster,
     };
     use crate::Drawing;
     use crate::score_json::parse_score_json;
-    use skia_safe::{
-        AlphaType, Color, ColorType, Data, Image, ImageInfo, Paint, Rect, image::CachingHint,
-        surfaces,
-    };
+    use tiny_skia::{Color, Pixmap};
 
     #[test]
-    fn mtpng_round_trips_unpremultiplied_rgba_pixels() {
-        let mut surface = surfaces::raster_n32_premul((3, 2)).expect("surface");
-        surface.canvas().clear(Color::TRANSPARENT);
-        let mut paint = Paint::default();
-        paint.set_color(Color::from_argb(127, 20, 80, 140));
-        surface
-            .canvas()
-            .draw_rect(Rect::from_xywh(0.0, 0.0, 2.0, 2.0), &paint);
-        paint.set_color(Color::from_argb(255, 240, 10, 60));
-        surface
-            .canvas()
-            .draw_rect(Rect::from_xywh(2.0, 0.0, 1.0, 1.0), &paint);
+    fn png_round_trips_unpremultiplied_rgba_pixels() {
+        let mut surface = Pixmap::new(3, 2).expect("pixmap");
+        {
+            let mut canvas = Canvas::new(surface.as_mut());
+            canvas.clear(Color::TRANSPARENT);
+            let mut paint = Paint::default();
+            paint.set_color(Color::from_rgba8(20, 80, 140, 127));
+            canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 2.0, 2.0), &paint);
+            paint.set_color(Color::from_rgba8(240, 10, 60, 255));
+            canvas.draw_rect(Rect::from_xywh(2.0, 0.0, 1.0, 1.0), &paint);
+        }
+        let expected = codec::unpremultiplied_rgba(surface.as_ref());
 
-        let info = ImageInfo::new((3, 2), ColorType::RGBA8888, AlphaType::Unpremul, None);
-        let mut expected = vec![0_u8; 3 * 2 * 4];
-        assert!(surface.read_pixels(&info, &mut expected, 3 * 4, (0, 0)));
+        let encoded = codec::encode_png(surface.as_ref()).expect("PNG encode");
+        let decoded = codec::decode_image(&encoded).expect("PNG decode");
+        assert_eq!(decoded.data(), surface.data());
+        assert_eq!(codec::unpremultiplied_rgba(decoded.as_ref()), expected);
+    }
 
-        let encoded = encode_surface_mtpng(&mut surface).expect("mtpng encode");
-        let decoded = Image::from_encoded(Data::new_copy(&encoded)).expect("PNG decode");
-        let mut actual = vec![0_u8; expected.len()];
-        assert!(decoded.read_pixels(&info, &mut actual, 3 * 4, (0, 0), CachingHint::Disallow,));
-        assert_eq!(actual, expected);
+    #[test]
+    fn jpeg_encoder_writes_a_baseline_jpeg() {
+        // A gradient with detail in every MCU, so a scan that a decoder reads
+        // wrongly (as zune-jpeg did with jpeg-encoder's three-scan optimized
+        // output) cannot pass.
+        let (w, h) = (67, 45);
+        let mut surface = Pixmap::new(w, h).expect("pixmap");
+        for (i, px) in surface.pixels_mut().iter_mut().enumerate() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            *px = tiny_skia::ColorU8::from_rgba(
+                (x * 3) as u8,
+                (y * 5) as u8,
+                ((x + y) * 2) as u8,
+                255,
+            )
+            .premultiply();
+        }
+        for subsampling in [JpegSubsampling::Yuv420, JpegSubsampling::Yuv444] {
+            let encoded =
+                codec::encode_jpeg(surface.as_ref(), 90, subsampling).expect("jpeg encode");
+            assert!(encoded.starts_with(&[0xff, 0xd8]));
+            // Exactly one scan (baseline, interleaved).
+            assert_eq!(encoded.windows(2).filter(|m| *m == [0xff, 0xda]).count(), 1);
+            let decoded = codec::decode_image(&encoded).expect("JPEG decode");
+            assert_eq!((decoded.width(), decoded.height()), (w, h));
+            let mut max = 0;
+            for (a, b) in surface.pixels().iter().zip(decoded.pixels()) {
+                for (u, v) in [
+                    (a.red(), b.red()),
+                    (a.green(), b.green()),
+                    (a.blue(), b.blue()),
+                ] {
+                    max = max.max((i32::from(u) - i32::from(v)).abs());
+                }
+                assert_eq!(b.alpha(), 255);
+            }
+            assert!(max <= 24, "{subsampling:?}: max channel error {max}");
+        }
+        assert_eq!(
+            JpegSubsampling::parse("4:4:4"),
+            Some(JpegSubsampling::Yuv444)
+        );
+        assert_eq!(JpegSubsampling::parse("422"), None);
+    }
+
+    #[test]
+    fn fractional_translate_blit_resamples_bilinearly() {
+        let mut image = Pixmap::new(1, 2).expect("image");
+        image
+            .data_mut()
+            .copy_from_slice(&[0, 0, 0, 255, 255, 255, 255, 255]);
+        let mut surface = Pixmap::new(1, 4).expect("pixmap");
+        {
+            let mut canvas = Canvas::new(surface.as_mut());
+            canvas.clear(Color::BLACK);
+            canvas.draw_image_rect(&image, None, Rect::from_xywh(0.0, 1.5, 1.0, 2.0));
+        }
+        let rows: Vec<u8> = surface.pixels().iter().map(|p| p.red()).collect();
+        // Rows 1 and 3 are half covered; row 2 samples halfway between the two texels.
+        assert_eq!(rows[0], 0);
+        assert_eq!(rows[2], 128);
+        assert!((i32::from(rows[3]) - 128).abs() <= 1, "{rows:?}");
     }
 
     #[test]
@@ -3826,7 +3932,15 @@ mod tests {
         .expect("score");
         let mut drawing = Drawing::new(None, None, false, None, None, None);
 
-        let raster = score_to_skia_raster(&mut drawing, &mut score, None).expect("raster");
+        // Without registered fonts, text needs the system font fallback.
+        let raster = match score_to_skia_raster(&mut drawing, &mut score, None) {
+            Ok(raster) => raster,
+            Err(SkiaDirectError::NoFonts) => {
+                assert!(!super::system_fonts_available());
+                return;
+            }
+            Err(error) => panic!("raster: {error}"),
+        };
 
         assert!(raster.width > 0);
         assert!(raster.height > 0);
@@ -3835,10 +3949,8 @@ mod tests {
             raster.pixels.len(),
             raster.row_bytes * raster.height as usize
         );
-        assert!(matches!(
-            raster.color_type,
-            SkiaRasterColorType::Rgba8888 | SkiaRasterColorType::Bgra8888
-        ));
+        assert_eq!(raster.color_type, SkiaRasterColorType::Rgba8888);
+        assert_eq!(raster.row_bytes, raster.width as usize * 4);
         assert_eq!(raster.stats.encode, std::time::Duration::ZERO);
         assert_eq!(raster.stats.copy, std::time::Duration::ZERO);
     }

@@ -1,24 +1,41 @@
 [package]
 name = "pjsekai-scores-rs"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
-description = "Project SEKAI score (.sus) parser, SVG chart renderer, and Skia image renderer"
+description = "Project SEKAI score (.sus) parser, SVG chart renderer, and pure-Rust PNG/JPEG renderer"
 license = "MIT"
+repository = "https://github.com/Team-Haruki/pjsekai-scores-rs"
+exclude = [".github/", "python/"]
 
 [features]
 default = []
 python = ["dep:pyo3"]
-skia-image = ["dep:mtpng", "dep:skia-safe"]
+# The `pjsekai-scores-rs` command-line binary (clap). Library users do not pull clap in;
+# install the CLI with `cargo install pjsekai-scores-rs --features cli,image`.
+cli = ["dep:clap"]
+# PNG/JPEG/raster rendering, pure Rust: tiny-skia + skrifa, png (zlib-rs), zune-jpeg
+# and mozjpeg-rs. Opt-in, so library and wasm users get the parser and SVG renderer
+# only; the PyPI wheels and the release CLI binaries are built with it.
+image = ["dep:tiny-skia", "dep:skrifa", "dep:png", "dep:zune-jpeg", "dep:mozjpeg-rs"]
+# With `image`: resolve font families that are not in font_paths/font_dirs
+# (and generic ones such as sans-serif) from the system fonts via fontdb.
+system-fonts = ["image", "dep:fontdb"]
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
 num = "0.4"
 regex = "1"
 serde_json = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 pyo3 = { version = "0.29", features = ["extension-module", "generate-import-lib"], optional = true }
-mtpng = { version = "0.4.1", optional = true }
-skia-safe = { version = "0.99.0", optional = true }
+tiny-skia = { version = "0.12", optional = true, default-features = false, features = ["std", "simd"] }
+skrifa = { version = "0.48", optional = true, default-features = false, features = ["std"] }
+# zlib-rs: pure-Rust zlib for the deflate levels (faster than miniz_oxide).
+png = { version = "0.18", optional = true, features = ["zlib-rs"] }
+zune-jpeg = { version = "0.5", optional = true }
+# libjpeg-turbo-compatible output (same scan data), NEON and AVX2, no unsafe code.
+mozjpeg-rs = { version = "0.9", optional = true, default-features = false, features = ["fast-yuv"] }
+fontdb = { version = "0.24", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 
 [profile.release]
@@ -38,3 +55,4 @@ crate-type = ["lib", "cdylib"]
 [[bin]]
 name = "pjsekai-scores-rs"
 path = "src/main.rs"
+required-features = ["cli"]

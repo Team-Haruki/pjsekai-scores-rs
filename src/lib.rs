@@ -8,8 +8,8 @@ pub mod rebase;
 pub mod score;
 pub mod score_json;
 
-#[cfg(feature = "skia-image")]
-pub mod skia_direct;
+#[cfg(feature = "image")]
+pub mod tiny_skia_direct;
 
 // Re-exports for convenience
 pub use drawing::{Drawing, MusicMeta};
@@ -25,12 +25,18 @@ pub use rebase::Rebase;
 pub use score::Score;
 pub use score_json::ScoreJsonError;
 
-#[cfg(feature = "skia-image")]
-pub use skia_direct::{
-    PngEncoder, SkiaDirectError, SkiaImageFormat, SkiaImageOutput, SkiaRasterColorType,
+// PNG/JPEG/raster rendering (opt-in feature `image`) on tiny-skia + skrifa.
+#[cfg(feature = "image")]
+pub use tiny_skia_direct::{
+    JpegSubsampling, SkiaDirectError, SkiaImageFormat, SkiaImageOutput, SkiaRasterColorType,
     SkiaRasterOutput, SkiaRenderStats, score_to_skia_image, score_to_skia_image_with_stats,
-    score_to_skia_jpeg, score_to_skia_png, score_to_skia_png_with_encoder, score_to_skia_raster,
+    score_to_skia_jpeg, score_to_skia_jpeg_with_subsampling, score_to_skia_png,
+    score_to_skia_raster,
 };
+
+/// The backend behind the raster API (`"tiny-skia"`).
+#[cfg(feature = "image")]
+pub const RASTER_BACKEND: &str = tiny_skia_direct::BACKEND_NAME;
 
 /// Python bindings via PyO3 (only compiled with `--features python`)
 #[cfg(feature = "python")]

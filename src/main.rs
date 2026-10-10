@@ -30,7 +30,7 @@ struct Args {
     #[arg(long)]
     css: Option<String>,
 
-    /// Base URL for SVG note assets, or local directory for Skia image note assets
+    /// Base URL for SVG note assets, or local directory for PNG/JPEG note assets
     #[arg(long, default_value = "https://asset3.pjsekai.moe/live/note/custom01")]
     note_host: String,
 
@@ -38,11 +38,11 @@ struct Args {
     #[arg(long, default_value = "png")]
     note_asset_extension: String,
 
-    /// Font file path to load for Skia image output; may be repeated
+    /// Font file path to load for PNG/JPEG output; may be repeated
     #[arg(long = "font-path")]
     font_paths: Vec<String>,
 
-    /// Directory containing .ttf/.otf/.ttc fonts for Skia image output; may be repeated
+    /// Directory containing .ttf/.otf/.ttc fonts for PNG/JPEG output; may be repeated
     #[arg(long = "font-dir")]
     font_dirs: Vec<String>,
 
@@ -81,6 +81,10 @@ struct Args {
     /// JPEG quality for .jpg/.jpeg output (0-100)
     #[arg(long, default_value_t = 90, value_parser = parse_jpeg_quality)]
     jpeg_quality: u8,
+
+    /// JPEG chroma subsampling for .jpg/.jpeg output: 420 (default) or 444
+    #[arg(long, default_value = "420", value_parser = parse_jpeg_subsampling)]
+    jpeg_subsampling: String,
 
     /// Print render/write timing statistics
     #[arg(long)]
@@ -151,7 +155,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         OutputFormat::Png => write_skia_image_output(
             &output,
             OutputFormat::Png,
-            args.jpeg_quality,
+            (args.jpeg_quality, &args.jpeg_subsampling),
             &mut drawing,
             &mut score,
             lyric.as_ref(),
@@ -159,7 +163,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         OutputFormat::Jpeg => write_skia_image_output(
             &output,
             OutputFormat::Jpeg,
-            args.jpeg_quality,
+            (args.jpeg_quality, &args.jpeg_subsampling),
             &mut drawing,
             &mut score,
             lyric.as_ref(),
@@ -211,29 +215,30 @@ fn write_svg_output(
         render,
         write,
         total: total_started.elapsed(),
-        #[cfg(feature = "skia-image")]
+        #[cfg(feature = "image")]
         skia: None,
     })
 }
 
-#[cfg(feature = "skia-image")]
+#[cfg(feature = "image")]
 fn write_skia_image_output(
     output: &str,
     output_format: OutputFormat,
-    jpeg_quality: u8,
+    (jpeg_quality, jpeg_subsampling): (u8, &str),
     drawing: &mut Drawing,
     score: &mut Score,
     lyric: Option<&Lyric>,
 ) -> Result<OutputStats, Box<dyn std::error::Error>> {
-    use pjsekai_scores_rs::{SkiaImageFormat, score_to_skia_image_with_stats};
+    use pjsekai_scores_rs::{JpegSubsampling, SkiaImageFormat, score_to_skia_image_with_stats};
 
     let total_started = Instant::now();
     let skia_format = match output_format {
         OutputFormat::Png => SkiaImageFormat::Png,
-        OutputFormat::Jpeg => SkiaImageFormat::Jpeg {
+        OutputFormat::Jpeg => SkiaImageFormat::JpegSubsampled {
             quality: jpeg_quality,
+            subsampling: JpegSubsampling::parse(jpeg_subsampling).unwrap_or_default(),
         },
-        OutputFormat::Svg => unreachable!("SVG output does not use Skia"),
+        OutputFormat::Svg => unreachable!("SVG output is not rasterized"),
     };
     let image = score_to_skia_image_with_stats(drawing, score, lyric, skia_format)?;
     let write_started = Instant::now();
@@ -247,28 +252,33 @@ fn write_skia_image_output(
     })
 }
 
-#[cfg(not(feature = "skia-image"))]
+#[cfg(not(feature = "image"))]
 fn write_skia_image_output(
     _output: &str,
     _output_format: OutputFormat,
-    _jpeg_quality: u8,
+    _jpeg: (u8, &str),
     _drawing: &mut Drawing,
     _score: &mut Score,
     _lyric: Option<&Lyric>,
 ) -> Result<OutputStats, Box<dyn std::error::Error>> {
-    Err("PNG/JPEG output requires building with `--features skia-image`".into())
+    Err(
+        "PNG/JPEG output requires the `image` feature; this binary was built without it and \
+         only writes SVG. Rebuild with `--features cli,image`, e.g. \
+         `cargo install pjsekai-scores-rs --features cli,image`."
+            .into(),
+    )
 }
 
 struct OutputStats {
     render: Duration,
     write: Duration,
     total: Duration,
-    #[cfg(feature = "skia-image")]
+    #[cfg(feature = "image")]
     skia: Option<pjsekai_scores_rs::SkiaRenderStats>,
 }
 
 fn print_output_stats(stats: &OutputStats) {
-    #[cfg(feature = "skia-image")]
+    #[cfg(feature = "image")]
     if let Some(skia) = stats.skia {
         eprintln!(
             "Timing: render {} (layout {}, setup {}, draw {}, encode {}, copy {}), write {}, total {}",
@@ -339,6 +349,14 @@ fn output_format(output: &str) -> Result<OutputFormat, Box<dyn std::error::Error
             "unsupported output extension `{ext}`; use .svg, .png, .jpg, or .jpeg"
         )
         .into()),
+    }
+}
+
+fn parse_jpeg_subsampling(value: &str) -> Result<String, String> {
+    match value.trim() {
+        "420" | "4:2:0" => Ok("420".to_string()),
+        "444" | "4:4:4" => Ok("444".to_string()),
+        _ => Err("JPEG subsampling must be 420 or 444".to_string()),
     }
 }
 
@@ -447,6 +465,7 @@ mod tests {
             skill: false,
             music_meta: None,
             jpeg_quality: 90,
+            jpeg_subsampling: "420".to_string(),
             perf: false,
             output: output.map(|path| path.to_string_lossy().into_owned()),
             generator: None,
@@ -567,15 +586,15 @@ mod tests {
     }
 
     #[test]
-    fn reports_raster_requirement_without_skia_feature() {
-        #[cfg(not(feature = "skia-image"))]
+    fn reports_raster_requirement_without_image_feature() {
+        #[cfg(not(feature = "image"))]
         {
             let dir = TestDir::new();
             let score_path = dir.path("chart.sus");
             fs::write(&score_path, "#BPM01: 120\n#00008: 01\n").unwrap();
             let cli = args(score_path, Some(dir.path("chart.png")));
-            let error = run(cli).expect_err("PNG needs Skia feature");
-            assert!(error.to_string().contains("requires building"));
+            let error = run(cli).expect_err("PNG needs the image feature");
+            assert!(error.to_string().contains("requires the `image` feature"));
         }
     }
 }
